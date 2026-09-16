@@ -1,0 +1,69 @@
+name: AppImage
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  appimage:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@v4
+
+      - name: Instalar Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Instalar bibliotecas de build e FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl file ffmpeg libegl1-mesa-dev libgl1-mesa-dev \
+            libwayland-dev libx11-dev libxkbcommon-dev
+
+      - name: Baixar ferramentas AppImage
+        run: |
+          mkdir -p "$RUNNER_TEMP/appimage-tools"
+          curl --fail --location --retry 3 \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage \
+            --output "$RUNNER_TEMP/appimage-tools/linuxdeploy"
+          curl --fail --location --retry 3 \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage \
+            --output "$RUNNER_TEMP/appimage-tools/appimagetool"
+          chmod +x "$RUNNER_TEMP/appimage-tools/"*
+
+      - name: Baixar yt-dlp standalone
+        run: |
+          curl --fail --location --retry 3 \
+            https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux \
+            --output "$RUNNER_TEMP/yt-dlp"
+          chmod +x "$RUNNER_TEMP/yt-dlp"
+
+      - name: Montar AppImage
+        env:
+          LINUXDEPLOY: ${{ runner.temp }}/appimage-tools/linuxdeploy
+          APPIMAGETOOL: ${{ runner.temp }}/appimage-tools/appimagetool
+          YTDLP_BINARY: ${{ runner.temp }}/yt-dlp
+          FFMPEG_BINARY: /usr/bin/ffmpeg
+          FFPROBE_BINARY: /usr/bin/ffprobe
+          APPIMAGE_OUTPUT_DIR: ${{ github.workspace }}/dist
+        run: ./packaging/build-appimage.sh
+
+      - name: Publicar artefato da execução
+        uses: actions/upload-artifact@v4
+        with:
+          name: Downloader-AppImage
+          path: |
+            dist/Downloader-x86_64.AppImage
+            dist/Downloader-x86_64.AppImage.sha256
+
+      - name: Publicar GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/Downloader-x86_64.AppImage dist/Downloader-x86_64.AppImage.sha256 --generate-notes

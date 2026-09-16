@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Downloader
+Comment=Baixe e converta mídia com yt-dlp e FFmpeg
+Exec=downloader-desktop %U
+Icon=io.github.xoykor.Downloader
+Terminal=false
+Categories=AudioVideo;Network;
+StartupNotify=true

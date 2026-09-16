@@ -63,6 +63,13 @@ O estado detalhado, limites conhecidos, autenticação e o roteiro dos quatro ag
 Para entender os módulos e os fluxos, consulte [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 e o [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md).
 
+## Distribuição AppImage
+
+O workflow do GitHub gera um pacote `Downloader-x86_64.AppImage` com o
+executável, `yt-dlp`, FFmpeg e ffprobe. Pushes com tags como `v0.1.0` também
+publicam o arquivo em uma GitHub Release. Veja
+[`packaging/README.md`](packaging/README.md).
+
 ## Proteção do YouTube
 
 Pausa de 5 segundos entre downloads e até 300 inícios de vídeo por janela móvel

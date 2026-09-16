@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+set -eu
+
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Keep the application unchanged while making the helpers shipped in the
+# AppImage take precedence over host installations.
+export PATH="$HERE/usr/bin:$PATH"
+exec "$HERE/usr/bin/downloader-desktop" "$@"
