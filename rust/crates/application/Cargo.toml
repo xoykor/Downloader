@@ -1,0 +1,16 @@
+[package]
+name = "downloader-application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+downloader-domain = { path = "../domain" }
+downloader-infra = { path = "../infra" }
+downloader-media = { package = "media", path = "../media" }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-util = "0.7"
+
+[dev-dependencies]
+tempfile = "3"

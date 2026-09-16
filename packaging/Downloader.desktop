@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Downloader
+Comment=Baixe e converta mídia com yt-dlp e FFmpeg
+Exec=/home/x/Documentos/Estudo/Downloader/rust/target/release/downloader-desktop
+TryExec=/home/x/Documentos/Estudo/Downloader/rust/target/release/downloader-desktop
+Path=/home/x/Documentos/Estudo/Downloader/rust
+Terminal=false
+Categories=AudioVideo;
+StartupNotify=true

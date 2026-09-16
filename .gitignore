@@ -1,0 +1,22 @@
+# Python local environment and caches
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Rust build artifacts
+rust/target/
+
+# Local application state and media generated during tests
+.downloader/
+rust/.downloader/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.part
+
+# Credentials and local logs must never enter version control
+cookies*.txt
+*.cookies
+*.log
+.DS_Store
