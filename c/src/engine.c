@@ -294,37 +294,40 @@ static bool cancel_requested(atomic_bool *flag)
     return flag != NULL && atomic_load(flag);
 }
 
-static bool youtube_acquire_slots(DldEngine *engine, unsigned slots, atomic_bool *cancel_flag,
-                                  DldAppError *error)
+static bool youtube_remaining_allowance(DldEngine *engine,
+                                        unsigned *allowance,
+                                        DldAppError *error)
 {
-    if (!engine->youtube_protection || slots == 0U) return true;
+    if (allowance == NULL) return false;
+    *allowance = 300U;
+
+    if (!engine->youtube_protection) return true;
+
     const uint64_t window_ms = UINT64_C(90) * 60U * 1000U;
-    for (;;) {
-        const uint64_t now = now_ms();
-        const uint64_t since = now > window_ms ? now - window_ms : 0U;
-        (void)dld_database_prune_youtube_starts(&engine->database, since, error);
-        unsigned count = 0U;
-        uint64_t oldest = 0U;
-        if (!dld_database_count_youtube_starts_since(&engine->database, since, &count, &oldest, error)) return false;
-        if (count <= 300U && slots <= 300U - count) {
-            for (unsigned i = 0U; i < slots; ++i) {
-                if (!dld_database_record_youtube_start(&engine->database, now, error)) return false;
-            }
-            return true;
-        }
-        if (cancel_requested(cancel_flag)) {
-            (void)dld_app_error_set(error, DLD_ERROR_CANCELLED, "Espera do YouTube cancelada.",
-                                    "limite YouTube", false, 0);
-            return false;
-        }
-        const uint64_t wait_until = oldest + window_ms + 1000U;
-        const uint64_t wait_ms = wait_until > now ? wait_until - now : 1000U;
-        const unsigned seconds = (unsigned)((wait_ms + 999U) / 1000U);
-        for (unsigned i = 0U; i < seconds; ++i) {
-            if (cancel_requested(cancel_flag)) return false;
-            sleep(1U);
-        }
+    const uint64_t now = now_ms();
+    const uint64_t since = now > window_ms ? now - window_ms : 0U;
+
+    if (!dld_database_prune_youtube_starts(
+            &engine->database,
+            since,
+            error)) {
+        return false;
     }
+
+    unsigned count = 0U;
+    uint64_t oldest = 0U;
+    if (!dld_database_count_youtube_starts_since(
+            &engine->database,
+            since,
+            &count,
+            &oldest,
+            error)) {
+        return false;
+    }
+
+    (void)oldest;
+    *allowance = count >= 300U ? 0U : 300U - count;
+    return true;
 }
 
 static bool probe_file(DldEngine *engine, const char *path, DldProbeSummary *summary,
@@ -375,9 +378,11 @@ static char *extract_id_from_filename(const char *name)
 }
 
 typedef struct {
+    DldEngine *engine;
     const DldTaskRecord *task;
     DldEngineEventCallback callback;
     void *userdata;
+    bool account_youtube_starts;
 } ProgressContext;
 
 static char *track_event_id(const DldTaskRecord *task,
@@ -428,8 +433,28 @@ static void track_display_message(const DldTrackLine *track,
 static void download_progress_line(const char *line, void *userdata)
 {
     ProgressContext *context = userdata;
-    DldTrackLine track;
 
+    if (context->account_youtube_starts &&
+        line != NULL &&
+        strncmp(line, "POLICY_VIDEO ", 13U) == 0) {
+        /*
+         * Contabiliza somente quando yt-dlp realmente entra em before_dl.
+         * Erro de persistência não derruba a mídia; ele só desativa a precisão
+         * do histórico desta execução.
+         */
+        DldAppError counter_error;
+        dld_app_error_init(&counter_error);
+        if (!dld_database_record_youtube_start(
+                &context->engine->database,
+                now_ms(),
+                &counter_error)) {
+            context->account_youtube_starts = false;
+        }
+        dld_app_error_clear(&counter_error);
+        return;
+    }
+
+    DldTrackLine track;
     if (!dld_parse_track_line(line, &track)) return;
 
     char *event_id = track_event_id(
@@ -500,6 +525,18 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
     DldMediaSummary summary;
     dld_media_summary_init(&summary);
     const DldAuthRef *auth = task->has_auth ? &task->auth : NULL;
+
+    emit_event(
+        callback,
+        userdata,
+        task->id,
+        DLD_STATUS_ANALYZING,
+        false,
+        0.0,
+        NULL,
+        playlist ? "Analisando playlist…" : "Analisando mídia…",
+        NULL);
+
     if (!dld_engine_analyze(engine, task->input_url, playlist, auth, cancel_flag, &summary, error)) {
         dld_media_summary_clear(&summary);
         goto fail;
@@ -534,39 +571,57 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
         }
     }
 
-    if (is_youtube_url(task->input_url)) {
-        const size_t requested =
-            playlist && summary.playlist_entries > 0U
-                ? summary.playlist_entries
-                : 1U;
+    const bool youtube_limited =
+        engine->youtube_protection &&
+        is_youtube_url(task->input_url);
+    unsigned youtube_allowance = 0U;
 
-        /*
-         * Reservar lotes sucessivos antes de iniciar fazia playlists >300 ficarem
-         * paradas por até 90 minutos sem baixar nada. A proteção é conservadora:
-         * uma única execução pode reservar no máximo a janela inteira.
-         */
-        if (engine->youtube_protection && requested > 300U) {
+    if (youtube_limited) {
+        if (!youtube_remaining_allowance(
+                engine,
+                &youtube_allowance,
+                error)) {
+            dld_media_summary_clear(&summary);
+            goto fail;
+        }
+
+        if (youtube_allowance == 0U) {
             (void)dld_app_error_set(
                 error,
                 DLD_ERROR_NETWORK,
-                "A proteção do YouTube limita uma playlist a 300 itens por execução. "
-                "Divida a playlist ou desative a proteção nas configurações.",
+                "Limite local do YouTube atingido: 300 vídeos em 90 minutos. "
+                "Nenhum download foi iniciado nesta tentativa.",
                 "limite YouTube",
                 false,
                 0);
             dld_media_summary_clear(&summary);
             goto fail;
         }
-
-        if (!youtube_acquire_slots(
-                engine,
-                (unsigned)requested,
-                cancel_flag,
-                error)) {
-            dld_media_summary_clear(&summary);
-            goto fail;
-        }
     }
+
+    char starting_message[192];
+    if (playlist && summary.playlist_entries > 0U) {
+        (void)snprintf(
+            starting_message,
+            sizeof(starting_message),
+            "Playlist encontrada: %zu itens · iniciando yt-dlp…",
+            summary.playlist_entries);
+    } else {
+        (void)snprintf(
+            starting_message,
+            sizeof(starting_message),
+            "Iniciando yt-dlp…");
+    }
+    emit_event(
+        callback,
+        userdata,
+        task->id,
+        DLD_STATUS_DOWNLOADING,
+        false,
+        0.0,
+        NULL,
+        starting_message,
+        NULL);
 
     char *tmp_root = path_join(engine->data_dir, "tmp");
     char *tmp_dir = tmp_root != NULL ? path_join(tmp_root, task->id) : NULL;
@@ -596,15 +651,18 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
         format,
         max_height,
         bitrate,
-        engine->youtube_protection,
+        youtube_limited,
+        youtube_allowance,
         auth,
         &command,
         error);
 
     ProgressContext progress_context = {
+        .engine = engine,
         .task = task,
         .callback = callback,
         .userdata = userdata,
+        .account_youtube_starts = youtube_limited,
     };
 
     if (ok) {
