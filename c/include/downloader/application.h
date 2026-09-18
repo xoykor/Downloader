@@ -1,6 +1,14 @@
 #ifndef DOWNLOADER_APPLICATION_H
 #define DOWNLOADER_APPLICATION_H
 
+/*
+ * Máquina de estados e fila em memória.
+ *
+ * A fila guarda índices do vetor `tasks`, não ponteiros. O vetor pode crescer com
+ * `realloc` sem invalidar a ordem pendente, e tarefas nunca são removidas durante
+ * a vida de `DldApplicationState`, portanto seus índices permanecem estáveis.
+ */
+
 #include "downloader/domain.h"
 
 #include <stddef.h>

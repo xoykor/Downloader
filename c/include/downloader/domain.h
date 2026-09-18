@@ -1,6 +1,16 @@
 #ifndef DOWNLOADER_DOMAIN_H
 #define DOWNLOADER_DOMAIN_H
 
+/*
+ * Contratos de dados compartilhados por todo o programa.
+ *
+ * Convenção de memória:
+ * - campos `char *` dentro das structs pertencem à própria struct;
+ * - funções `*_copy` fazem cópia profunda;
+ * - funções `*_clear` liberam tudo que a struct possui e a deixam reutilizável;
+ * - strings retornadas como `const char *` são emprestadas e nunca devem ser liberadas.
+ */
+
 #include <stdbool.h>
 #include <stdint.h>
 

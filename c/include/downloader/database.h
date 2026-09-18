@@ -1,6 +1,14 @@
 #ifndef DOWNLOADER_DATABASE_H
 #define DOWNLOADER_DATABASE_H
 
+/*
+ * Persistência SQLite das tarefas e do limitador de requisições.
+ *
+ * `DldDatabase` possui `path` e o handle SQLite enquanto estiver aberto. Listas
+ * retornadas por `dld_database_list_tasks` pertencem ao chamador e devem ser
+ * liberadas exclusivamente com `dld_database_free_task_list`.
+ */
+
 #include "downloader/domain.h"
 
 #include <stddef.h>
