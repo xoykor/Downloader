@@ -192,7 +192,11 @@ bool dld_build_analysis_command(const char *yt_dlp, const char *url, bool playli
         return false;
     }
     if (!begin_command(command, yt_dlp, error)) return false;
-    if (!command_push(command, "-J") || !command_push(command, "--simulate")) goto oom;
+    if (!command_push(command, "--ignore-config") ||
+        !command_push(command, "-J") ||
+        !command_push(command, "--simulate")) {
+        goto oom;
+    }
     if (playlist) {
         if (!command_push(command, "--flat-playlist") ||
             !command_push(command, "--lazy-playlist")) {
@@ -240,7 +244,8 @@ bool dld_build_download_command(const char *yt_dlp, const char *url,
                                 const char *output_template, bool playlist,
                                 const char *media_kind, const char *format,
                                 unsigned max_height, const char *bitrate,
-                                bool youtube_protection, const DldAuthRef *auth,
+                                bool youtube_protection, unsigned youtube_allowance,
+                                const DldAuthRef *auth,
                                 DldCommand *command, DldAppError *error)
 {
     if (!dld_validate_url(url)) {
@@ -252,6 +257,11 @@ bool dld_build_download_command(const char *yt_dlp, const char *url,
         return false;
     }
     if (!begin_command(command, yt_dlp, error)) return false;
+    if (!command_push(command, "--ignore-config") ||
+        !command_push(command, "--no-simulate")) {
+        goto oom;
+    }
+
     if (playlist) {
         /*
          * Seja explícito: alguns URLs misturam vídeo e playlist, e a intenção da
@@ -287,9 +297,36 @@ bool dld_build_download_command(const char *yt_dlp, const char *url,
         goto oom;
     }
     if (youtube_protection) {
-        if (!command_push_pair(command, "--sleep-interval", "5") ||
+        if (!command_push_pair(command, "--sleep-requests", "5.4") ||
+            !command_push_pair(command, "--sleep-interval", "5") ||
+            !command_push_pair(command, "--max-sleep-interval", "5") ||
+            !command_push_pair(command, "--concurrent-fragments", "1") ||
             !command_push_pair(command, "--retries", "3") ||
-            !command_push_pair(command, "--fragment-retries", "3")) goto oom;
+            !command_push_pair(command, "--fragment-retries", "3")) {
+            goto oom;
+        }
+
+        /*
+         * O limite móvel é contado no momento real de before_dl. Diferente da
+         * implementação C anterior, apenas abrir uma playlist não consome N
+         * slots. --max-downloads impede que o processo ultrapasse a folga atual.
+         */
+        if (youtube_allowance > 0U) {
+            char allowance[32];
+            (void)snprintf(
+                allowance,
+                sizeof(allowance),
+                "%u",
+                youtube_allowance);
+
+            if (!command_push_pair(command, "--max-downloads", allowance) ||
+                !command_push_pair(
+                    command,
+                    "--print",
+                    "before_dl:POLICY_VIDEO %(id)j")) {
+                goto oom;
+            }
+        }
     }
 
     char *selector = build_format_selector(media_kind, max_height);

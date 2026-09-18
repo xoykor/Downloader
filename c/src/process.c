@@ -206,10 +206,14 @@ bool dld_process_run(const DldProcessSpec *spec, atomic_bool *cancel_flag,
     (void)set_nonblocking(out_pipe[0]);
     (void)set_nonblocking(err_pipe[0]);
 
-    TextBuffer stdout_buffer, stderr_buffer, line_buffer;
+    TextBuffer stdout_buffer;
+    TextBuffer stderr_buffer;
+    TextBuffer stdout_line_buffer;
+    TextBuffer stderr_line_buffer;
     buffer_init(&stdout_buffer);
     buffer_init(&stderr_buffer);
-    buffer_init(&line_buffer);
+    buffer_init(&stdout_line_buffer);
+    buffer_init(&stderr_line_buffer);
     bool stdout_eof = false;
     bool stderr_eof = false;
     bool child_exited = false;
@@ -255,17 +259,31 @@ bool dld_process_run(const DldProcessSpec *spec, atomic_bool *cancel_flag,
         (void)poll(fds, 2, 50);
 
         if (!stdout_eof && (fds[0].revents & (POLLIN | POLLHUP)) != 0) {
-            if (!read_pipe(out_pipe[0], &stdout_buffer, &line_buffer, on_stdout_line,
-                           userdata, &stdout_eof)) goto io_failure;
-        }
-        if (!stderr_eof && (fds[1].revents & (POLLIN | POLLHUP)) != 0) {
-            TextBuffer unused_lines;
-            buffer_init(&unused_lines);
-            if (!read_pipe(err_pipe[0], &stderr_buffer, &unused_lines, NULL, NULL, &stderr_eof)) {
-                buffer_clear(&unused_lines);
+            if (!read_pipe(
+                    out_pipe[0],
+                    &stdout_buffer,
+                    &stdout_line_buffer,
+                    on_stdout_line,
+                    userdata,
+                    &stdout_eof)) {
                 goto io_failure;
             }
-            buffer_clear(&unused_lines);
+        }
+        if (!stderr_eof && (fds[1].revents & (POLLIN | POLLHUP)) != 0) {
+            /*
+             * yt-dlp escreve progresso no stderr em algumas combinações de
+             * opções. Entregamos linhas dos dois streams ao mesmo callback;
+             * parsers estruturados simplesmente ignoram diagnósticos comuns.
+             */
+            if (!read_pipe(
+                    err_pipe[0],
+                    &stderr_buffer,
+                    &stderr_line_buffer,
+                    on_stdout_line,
+                    userdata,
+                    &stderr_eof)) {
+                goto io_failure;
+            }
         }
 
         if (!child_exited) {
@@ -275,15 +293,19 @@ bool dld_process_run(const DldProcessSpec *spec, atomic_bool *cancel_flag,
         }
     }
 
-    if (on_stdout_line != NULL && line_buffer.length > 0U) {
-        on_stdout_line(line_buffer.data, userdata);
+    if (on_stdout_line != NULL && stdout_line_buffer.length > 0U) {
+        on_stdout_line(stdout_line_buffer.data, userdata);
+    }
+    if (on_stdout_line != NULL && stderr_line_buffer.length > 0U) {
+        on_stdout_line(stderr_line_buffer.data, userdata);
     }
     result->exited = child_exited;
     if (child_exited && WIFEXITED(child_status)) result->exit_code = WEXITSTATUS(child_status);
     else if (child_exited && WIFSIGNALED(child_status)) result->exit_code = 128 + WTERMSIG(child_status);
     result->stdout_text = buffer_take(&stdout_buffer);
     result->stderr_text = buffer_take(&stderr_buffer);
-    buffer_clear(&line_buffer);
+    buffer_clear(&stdout_line_buffer);
+    buffer_clear(&stderr_line_buffer);
     close_fd(&out_pipe[0]);
     close_fd(&err_pipe[0]);
     return result->stdout_text != NULL && result->stderr_text != NULL;
@@ -297,7 +319,8 @@ io_failure:
         close_fd(&err_pipe[0]);
         buffer_clear(&stdout_buffer);
         buffer_clear(&stderr_buffer);
-        buffer_clear(&line_buffer);
+        buffer_clear(&stdout_line_buffer);
+        buffer_clear(&stderr_line_buffer);
         (void)dld_app_error_set(error, DLD_ERROR_INTERNAL, "Falha ao ler saída do processo.",
                                 "processo", true, saved);
         return false;

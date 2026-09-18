@@ -34,6 +34,11 @@ typedef struct {
     char *stderr_text;
 } DldProcessResult;
 
+/*
+ * Recebe linhas completas de stdout E stderr. Isso é intencional: ferramentas
+ * como yt-dlp podem mandar progresso para stderr. O callback deve ignorar linhas
+ * que não pertençam ao protocolo que está parseando.
+ */
 typedef void (*DldProcessLineCallback)(const char *line, void *userdata);
 
 void dld_process_result_init(DldProcessResult *result);
@@ -44,7 +49,7 @@ void dld_process_result_clear(DldProcessResult *result);
  * e cookies permanecem argumentos independentes e não viram código de shell.
  */
 bool dld_process_run(const DldProcessSpec *spec, atomic_bool *cancel_flag,
-                     DldProcessLineCallback on_stdout_line, void *userdata,
+                     DldProcessLineCallback on_output_line, void *userdata,
                      DldProcessResult *result, DldAppError *error);
 
 /* Resolve PATH e opcionalmente captura a primeira linha de --version. */

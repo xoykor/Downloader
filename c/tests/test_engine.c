@@ -101,12 +101,14 @@ static void write_fake_ytdlp(const char *path, const char *fixture)
         "cp '%s' \"$dir/Faixa Um [id1].wav\"\n",
         fixture);
 
+    fputs("printf '%s\\n' 'POLICY_VIDEO id1'\n", script);
+
     fputs(
         "printf '%s\\n' "
         "'TRACK {\"id\":\"id1\",\"title\":\"Faixa Um\","
         "\"playlist_index\":1,\"playlist_count\":2} "
         "{\"_percent_str\":\"42.0%%\",\"_speed_str\":\"1.0MiB/s\","
-        "\"eta\":1,\"status\":\"downloading\"}'\n",
+        "\"eta\":1,\"status\":\"downloading\"}' >&2\n",
         script);
 
     fputs(
@@ -177,7 +179,8 @@ static void test_partial_playlist(DldEngine *engine,
 
     task.id = dld_string_duplicate("playlist-test");
     task.kind = DLD_TASK_DOWNLOAD;
-    task.input_url = dld_string_duplicate("https://example.test/playlist");
+    task.input_url = dld_string_duplicate(
+        "https://www.youtube.com/playlist?list=test");
     task.options_json = dld_string_duplicate(
         "{\"playlist\":true,\"media_kind\":\"video+audio\","
         "\"output_format\":\"auto\",\"bitrate\":\"auto\","
@@ -198,6 +201,17 @@ static void test_partial_playlist(DldEngine *engine,
     assert(task.status == DLD_STATUS_COMPLETED);
     assert(stats.child_progress_events > 0U);
     assert(stats.child_completed_events > 0U);
+
+    unsigned youtube_starts = 0U;
+    uint64_t oldest_start = 0U;
+    assert(dld_database_count_youtube_starts_since(
+        &engine->database,
+        0U,
+        &youtube_starts,
+        &oldest_start,
+        error));
+    assert(youtube_starts == 1U);
+    assert(oldest_start > 0U);
 
     char published[768];
     (void)snprintf(
@@ -291,7 +305,7 @@ int main(void)
         .yt_dlp = fake_ytdlp,
         .ffmpeg = ffmpeg_path,
         .ffprobe = ffprobe_path,
-        .youtube_protection = false,
+        .youtube_protection = true,
     };
 
     assert(dld_engine_open(&engine, &config, &error));

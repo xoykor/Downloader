@@ -92,7 +92,8 @@ bool dld_build_download_command(const char *yt_dlp, const char *url,
                                 const char *output_template, bool playlist,
                                 const char *media_kind, const char *format,
                                 unsigned max_height, const char *bitrate,
-                                bool youtube_protection, const DldAuthRef *auth,
+                                bool youtube_protection, unsigned youtube_allowance,
+                                const DldAuthRef *auth,
                                 DldCommand *command, DldAppError *error);
 bool dld_build_ffprobe_command(const char *ffprobe, const char *input,
                                DldCommand *command, DldAppError *error);
