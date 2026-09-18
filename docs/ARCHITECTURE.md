@@ -1,66 +1,79 @@
 # Arquitetura
 
-O aplicativo é um workspace Cargo em Rust. A interface e a CLI compartilham
-o mesmo runtime de fila; nenhuma delas executa `yt-dlp`, `ffmpeg` ou `ffprobe`
-diretamente.
+O Downloader é um projeto C17. GTK4 e a CLI compartilham o mesmo núcleo; nenhuma
+interface monta comandos de mídia por conta própria.
 
 ```text
-desktop (egui/eframe) ─┐
-cli -------------------┼─> application (fila e estados)
-                       │        │
-                       │        ├─> media (planos e argumentos)
-                       │        └─> infra (processos, SQLite, publicação, hardware)
-                       └─> domain (contratos serializáveis)
+desktop (GTK4) ─┐
+cli -------------┼─> engine
+                 │     ├─> application (fila/estados)
+                 │     ├─> media (argv + JSON)
+                 │     ├─> process (fork/exec/poll)
+                 │     ├─> database (SQLite)
+                 │     ├─> library (duplicados)
+                 │     ├─> hardware (sondagem)
+                 │     └─> publish (arquivo final)
+                 └─> domain (contratos)
 ```
 
-## Crates
+## Fronteiras
 
-- **domain:** `TaskRecord`, `TaskEvent`, comandos, estados, erros, planos e
-  referências de autenticação. Não acessa rede, disco ou processos.
-- **application:** escalonador, limites de concorrência, recuperação de tarefas
-  e execução das etapas. Publica somente artefatos validados.
-- **media:** parsers de JSON, seletores de yt-dlp, planos de conversão,
-  argumentos FFmpeg e validação de propriedades de mídia.
-- **infra:** `TokioProcessRunner`, SQLite, autenticação, publicação atômica e
-  sondagem de backends de hardware.
-- **desktop:** telas Downloads, Conversor, Fila/Histórico e Configurações.
-- **cli:** comandos headless para automação e diagnóstico.
+### domain
+
+Tipos, enums, erros e regras simples de estado. Não acessa o sistema.
+Strings pertencentes a registros são copiadas profundamente e liberadas por
+funções `*_clear` explícitas.
+
+### application
+
+Mantém tarefas e fila FIFO. Downloads têm limite independente de conversões.
+A interface GTK usa dois pools: 2 workers de download e 1 de conversão.
+
+### process
+
+Executa programas com `fork` + `execvp`, com `stdout`/`stderr` em pipes. Não há
+shell intermediário. `poll` permite consumir progresso enquanto o filho roda.
+Timeout e cancelamento enviam `SIGTERM`; após 2 s sem saída, escalam para
+`SIGKILL`.
+
+### media
+
+Monta `argv` para yt-dlp/ffmpeg/ffprobe e interpreta JSON com json-c. Referências
+de autenticação continuam sendo argumentos separados. O conteúdo de cookies
+não entra em mensagens ou no banco.
+
+### database
+
+SQLite guarda tarefas e o histórico do limitador do YouTube. WAL é ativado para
+permitir leitura/escrita concorrente do desktop.
+
+### engine
+
+Orquestra análise, download, conversão, validação e publicação. O download nunca
+é publicado diretamente: yt-dlp escreve numa pasta temporária da tarefa,
+ffprobe valida cada mídia e `publish` move o resultado. Conversões aceleradas
+que falham são repetidas automaticamente em software.
+
+### library
+
+`.downloader-library.json` relaciona identidade da mídia + formato ao basename
+do arquivo publicado. Caminhos do índice não podem escapar da pasta de destino.
 
 ## Fluxo de download
 
-1. A UI/CLI cria um `TaskRecord` com URL, formato, qualidade, bitrate, playlist
-   e autenticação opcional. A UI usa a referência `auto` quando nenhum campo
-   manual foi preenchido.
-2. `application` coloca a tarefa na fila e inicia o processo quando há limite.
-3. `media` constrói argumentos separados para yt-dlp; não há shell.
-4. O resultado fica em arquivo temporário oculto.
-5. `ffprobe` valida cada arquivo e `infra::publish` aplica a política de colisão.
-6. A aplicação registra destino e estado final no SQLite.
+1. analisar URL com yt-dlp;
+2. consultar índice de duplicados para item único;
+3. aplicar proteção persistente de YouTube quando habilitada;
+4. baixar na área temporária;
+5. validar cada arquivo com ffprobe;
+6. publicar segundo a política de colisão;
+7. atualizar índice e SQLite.
 
 ## Fluxo de conversão
 
-1. `ffprobe` descreve streams e contêiner.
-2. `media` escolhe cópia ou recodificação conforme o plano.
-3. `infra::hardware` testa o backend solicitado; falha retorna ao software.
-4. FFmpeg escreve em temporário, a saída é validada e só então publicada.
-
-## Persistência e privacidade
-
-O estado fica em `~/.downloader/tasks.sqlite` (com fallback local quando o HOME
-é somente leitura). Registros guardam referências de autenticação, nunca o
-conteúdo de cookies. O modo automático apenas verifica diretórios conhecidos e
-deixa a leitura dos cookies para o yt-dlp no momento da execução. Logs, eventos
-e mensagens de erro não devem conter credenciais ou cabeçalhos.
-
-## Testes
-
-Execute a partir de `rust/`:
-
-```bash
-cargo fmt --all -- --check
-cargo test --workspace --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
-```
-
-Testes que exigem rede ou uma GPU real ficam separados dos testes determinísticos
-e não são necessários para compilar o aplicativo.
+1. validar a entrada com ffprobe;
+2. resolver aceleração e sondar o dispositivo;
+3. executar FFmpeg em temporário;
+4. se hardware falhar, repetir em software;
+5. validar saída;
+6. publicar somente após validação.
