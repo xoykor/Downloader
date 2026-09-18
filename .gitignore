@@ -1,15 +1,13 @@
-# Python local environment and caches
-venv/
-__pycache__/
-*.py[cod]
-.pytest_cache/
-
-# Rust build artifacts
-rust/target/
+# Build artifacts
+build/
+dist/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
 
 # Local application state and media generated during tests
 .downloader/
-rust/.downloader/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
@@ -20,3 +18,9 @@ cookies*.txt
 *.cookies
 *.log
 .DS_Store
+
+# Editor / Python helper caches
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
