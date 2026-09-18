@@ -1,3 +1,11 @@
+/*
+ * Fila e máquina de estados em memória.
+ *
+ * Invariante principal: `tasks` cresce, mas tarefas não são removidas. Por isso
+ * `pending_indices` pode guardar índices estáveis mesmo quando `tasks` sofre
+ * `realloc`. Downloads e conversões possuem limites de concorrência separados.
+ */
+
 #include "downloader/application.h"
 
 #include <stdint.h>
@@ -20,6 +28,7 @@ static void set_internal_error(DldAppError *error, const char *message, const ch
     }
 }
 
+/* Crescimento geométrico evita `realloc` a cada nova tarefa. */
 static bool reserve_tasks(DldApplicationState *state, size_t required)
 {
     if (required <= state->task_capacity) return true;
@@ -32,6 +41,7 @@ static bool reserve_tasks(DldApplicationState *state, size_t required)
     return true;
 }
 
+/* A fila pendente armazena índices estáveis do vetor `tasks`. */
 static bool reserve_pending(DldApplicationState *state, size_t required)
 {
     if (required <= state->pending_capacity) return true;
@@ -137,7 +147,9 @@ void dld_application_state_init(DldApplicationState *state, DldQueueLimits limit
 void dld_application_state_clear(DldApplicationState *state)
 {
     if (state == NULL) return;
-    for (size_t i = 0; i < state->task_count; ++i) dld_task_record_clear(&state->tasks[i]);
+    for (size_t i = 0; i < state->task_count; ++i) {
+        dld_task_record_clear(&state->tasks[i]);
+    }
     free(state->tasks);
     free(state->pending_indices);
     const DldQueueLimits limits = state->limits;
@@ -190,7 +202,9 @@ bool dld_application_restore(DldApplicationState *state, const DldTaskRecord *ta
     }
     const size_t index = state->task_count;
     state->tasks[state->task_count++] = copy;
-    if (task->status == DLD_STATUS_QUEUED) state->pending_indices[state->pending_count++] = index;
+    if (task->status == DLD_STATUS_QUEUED) {
+        state->pending_indices[state->pending_count++] = index;
+    }
     return true;
 }
 
@@ -205,6 +219,10 @@ bool dld_application_enqueue(DldApplicationState *state, const DldTaskRecord *ta
         set_internal_error(error, "ID de tarefa já existe.", "fila");
         return false;
     }
+    /*
+     * Reserve as duas estruturas antes de alterar qualquer contador. Assim uma
+     * falha de memória nunca deixa uma tarefa inserida pela metade na fila.
+     */
     if (!reserve_tasks(state, state->task_count + 1U) ||
         !reserve_pending(state, state->pending_count + 1U)) {
         set_internal_error(error, "Memória insuficiente para adicionar tarefa.", "fila");
@@ -225,6 +243,11 @@ bool dld_application_enqueue(DldApplicationState *state, const DldTaskRecord *ta
     return true;
 }
 
+/*
+ * Não existe processo sobrevivente associado ao estado restaurado. Portanto um
+ * estado que era "ativo" antes do encerramento precisa virar "interrompido";
+ * tratá-lo como ainda ativo bloquearia a fila para sempre após reiniciar.
+ */
 size_t dld_application_recover_after_restart(DldApplicationState *state)
 {
     if (state == NULL) return 0U;
@@ -295,6 +318,10 @@ DldStartResult dld_application_start_next(DldApplicationState *state,
         set_internal_error(error, "Estado da aplicação inválido.", "fila");
         return DLD_START_ERROR;
     }
+    /*
+     * Procura da esquerda para a direita para preservar FIFO. Uma tarefa que não
+     * cabe no limite atual não impede outra categoria independente de iniciar.
+     */
     size_t position = SIZE_MAX;
     for (size_t i = 0; i < state->pending_count; ++i) {
         const size_t index = state->pending_indices[i];
@@ -310,8 +337,12 @@ DldStartResult dld_application_start_next(DldApplicationState *state,
     DldTaskRecord *task = &state->tasks[index];
     task->status = running_status(task->kind);
     task->updated_at_ms = now_ms();
-    if (task->kind == DLD_TASK_DOWNLOAD) ++state->active_downloads;
-    if (task->kind == DLD_TASK_CONVERT || task->kind == DLD_TASK_MERGE) ++state->active_conversions;
+    if (task->kind == DLD_TASK_DOWNLOAD) {
+        ++state->active_downloads;
+    }
+    if (task->kind == DLD_TASK_CONVERT || task->kind == DLD_TASK_MERGE) {
+        ++state->active_conversions;
+    }
     fill_event(state, task, "Tarefa iniciada.", event);
     return DLD_START_STARTED;
 }
@@ -330,6 +361,11 @@ bool dld_application_finish(DldApplicationState *state, const char *id,
         set_internal_error(error, "Tarefa não encontrada.", "fila");
         return false;
     }
+    /*
+     * O erro recebido pode apontar para memória pertencente ao chamador. Faça a
+     * cópia antes de mudar contadores/estado para manter a operação consistente
+     * mesmo se faltar memória.
+     */
     DldAppError copied;
     dld_app_error_init(&copied);
     if (task_error != NULL && !dld_app_error_copy(&copied, task_error)) {
