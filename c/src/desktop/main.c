@@ -1149,7 +1149,7 @@ static GtkWidget *make_settings_page(DesktopApp *app)
     gtk_widget_add_css_class(protection_title, "section-title");
 
     GtkWidget *protection_hint = gtk_label_new(
-        "5 segundos entre downloads · até 300 vídeos em 90 minutos");
+        "1 segundo entre faixas · até 300 vídeos em 90 minutos");
     gtk_label_set_xalign(GTK_LABEL(protection_hint), 0.0f);
     gtk_label_set_wrap(GTK_LABEL(protection_hint), TRUE);
     gtk_widget_add_css_class(protection_hint, "muted");
