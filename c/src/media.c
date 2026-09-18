@@ -194,8 +194,13 @@ bool dld_build_analysis_command(const char *yt_dlp, const char *url, bool playli
     if (!begin_command(command, yt_dlp, error)) return false;
     if (!command_push(command, "-J") || !command_push(command, "--simulate")) goto oom;
     if (playlist) {
-        if (!command_push(command, "--flat-playlist")) goto oom;
-    } else if (!command_push(command, "--no-playlist")) goto oom;
+        if (!command_push(command, "--flat-playlist") ||
+            !command_push(command, "--lazy-playlist")) {
+            goto oom;
+        }
+    } else if (!command_push(command, "--no-playlist")) {
+        goto oom;
+    }
     if (!append_auth(command, auth, error)) return false;
     if (!command_push(command, url)) goto oom;
     return true;
@@ -267,6 +272,9 @@ bool dld_build_download_command(const char *yt_dlp, const char *url,
      * títulos formatados para humanos.
      */
     if (!command_push(command, "--newline") ||
+        !command_push(command, "--progress") ||
+        !command_push(command, "--no-quiet") ||
+        !command_push_pair(command, "--progress-delta", "0.2") ||
         !command_push_pair(
             command,
             "--progress-template",
