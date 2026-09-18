@@ -20,7 +20,7 @@ int main(void)
 
     DldCommand command; dld_command_init(&command);
     assert(dld_build_download_command("yt-dlp", "https://example.test/x", "/tmp/%(id)s.%(ext)s",
-                                      false, "audio", "opus", 0U, "128K", true,
+                                      false, "audio", "opus", 0U, "128K", true, 300U,
                                       NULL, &command, &error));
     bool saw_no_playlist = false, saw_audio_format = false;
     for (size_t i = 0; i < command.argc; ++i) {
@@ -37,20 +37,34 @@ int main(void)
     dld_command_init(&command);
     assert(dld_build_download_command("yt-dlp", "https://example.test/playlist",
                                       "/tmp/%(id)s.%(ext)s", true,
-                                      "video+audio", "auto", 0U, "auto", true,
+                                      "video+audio", "auto", 0U, "auto", true, 42U,
                                       NULL, &command, &error));
     bool saw_yes_playlist = false;
     bool saw_ignore_errors = false;
     bool saw_track_template = false;
     bool saw_after_move = false;
+    bool saw_before_dl = false;
+    bool saw_max_downloads = false;
+    bool saw_ignore_config = false;
+    bool saw_no_simulate = false;
     for (size_t i = 0; i < command.argc; ++i) {
         if (strcmp(command.argv[i], "--yes-playlist") == 0) saw_yes_playlist = true;
         if (strcmp(command.argv[i], "--ignore-errors") == 0) saw_ignore_errors = true;
         if (strncmp(command.argv[i], "TRACK ", 6U) == 0) saw_track_template = true;
         if (strncmp(command.argv[i], "after_move:FILE ", 16U) == 0) saw_after_move = true;
+        if (strncmp(command.argv[i], "before_dl:POLICY_VIDEO ", 23U) == 0) saw_before_dl = true;
+        if (strcmp(command.argv[i], "--max-downloads") == 0 &&
+            i + 1U < command.argc &&
+            strcmp(command.argv[i + 1U], "42") == 0) {
+            saw_max_downloads = true;
+        }
+        if (strcmp(command.argv[i], "--ignore-config") == 0) saw_ignore_config = true;
+        if (strcmp(command.argv[i], "--no-simulate") == 0) saw_no_simulate = true;
     }
     assert(saw_yes_playlist && saw_ignore_errors);
     assert(saw_track_template && saw_after_move);
+    assert(saw_before_dl && saw_max_downloads);
+    assert(saw_ignore_config && saw_no_simulate);
 
     DldTrackLine track;
     assert(dld_parse_track_line(
