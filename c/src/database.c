@@ -64,7 +64,16 @@ bool dld_database_open(DldDatabase *database, const char *path, DldAppError *err
         ");"
         "CREATE INDEX IF NOT EXISTS idx_task_records_updated ON task_records(updated_at_ms DESC);"
         "CREATE TABLE IF NOT EXISTS youtube_starts (timestamp_ms INTEGER NOT NULL);"
-        "CREATE INDEX IF NOT EXISTS idx_youtube_starts_time ON youtube_starts(timestamp_ms);";
+        "CREATE INDEX IF NOT EXISTS idx_youtube_starts_time ON youtube_starts(timestamp_ms);"
+        "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+        /*
+         * Builds antigas reservavam TODOS os itens da playlist antes do primeiro
+         * byte. Isso podia bloquear o usuário por 90 min mesmo após uma tentativa
+         * que não baixou nada. A marca v2 limpa esse histórico incorreto uma vez.
+         */
+        "DELETE FROM youtube_starts "
+        "WHERE NOT EXISTS (SELECT 1 FROM app_meta WHERE key='youtube_counter_v2');"
+        "INSERT OR IGNORE INTO app_meta(key,value) VALUES('youtube_counter_v2','1');";
     char *sqlite_error = NULL;
     if (sqlite3_exec(db, schema, NULL, NULL, &sqlite_error) != SQLITE_OK) {
         (void)dld_app_error_set(error, DLD_ERROR_INTERNAL,
