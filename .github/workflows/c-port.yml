@@ -1,0 +1,33 @@
+name: C17 port
+
+on:
+  push:
+    branches: [c-port]
+    paths:
+      - "c/**"
+      - ".github/workflows/c-port.yml"
+  pull_request:
+    paths:
+      - "c/**"
+      - ".github/workflows/c-port.yml"
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@v4
+
+      - name: Configurar CMake
+        run: cmake -S c -B build/c -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Compilar C17
+        run: cmake --build build/c --parallel 2
+
+      - name: Executar testes
+        run: ctest --test-dir build/c --output-on-failure
+
+      - name: Exercitar CLI provisória
+        run: ./build/c/downloader-c-cli queue-demo
