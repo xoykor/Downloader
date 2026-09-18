@@ -57,7 +57,8 @@ bool dld_library_find(const char *directory, const char *media_id, const char *f
     char *file = index_path(directory);
     char *key = entry_key(media_id, format);
     if (file == NULL || key == NULL) {
-        free(file); free(key);
+        free(file);
+        free(key);
         return false;
     }
     struct json_object *root = load_index(file);
@@ -82,7 +83,8 @@ bool dld_library_find(const char *directory, const char *media_id, const char *f
         }
     }
     if (root != NULL) json_object_put(root);
-    free(file); free(key);
+    free(file);
+    free(key);
     return found;
 }
 
@@ -97,12 +99,14 @@ bool dld_library_record(const char *directory, const char *media_id, const char 
     char *file = index_path(directory);
     char *key = entry_key(media_id, format);
     if (file == NULL || key == NULL) {
-        free(file); free(key);
+        free(file);
+        free(key);
         return false;
     }
     struct json_object *root = load_index(file);
     if (root == NULL) {
-        free(file); free(key);
+        free(file);
+        free(key);
         return false;
     }
     json_object_object_add(root, key, json_object_new_string(basename));
@@ -110,7 +114,9 @@ bool dld_library_record(const char *directory, const char *media_id, const char 
     const size_t temp_len = strlen(file) + 5U;
     char *temporary = malloc(temp_len);
     if (temporary == NULL) {
-        json_object_put(root); free(file); free(key);
+        json_object_put(root);
+        free(file);
+        free(key);
         return false;
     }
     (void)snprintf(temporary, temp_len, "%s.tmp", file);
@@ -131,6 +137,7 @@ bool dld_library_record(const char *directory, const char *media_id, const char 
     }
     free(temporary);
     json_object_put(root);
-    free(file); free(key);
+    free(file);
+    free(key);
     return ok;
 }

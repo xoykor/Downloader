@@ -477,7 +477,10 @@ static void protection_changed(GtkSwitch *widget, GParamSpec *pspec, gpointer us
     (void)pspec;
     DesktopApp *app = userdata;
     app->engine.youtube_protection = gtk_switch_get_active(widget);
-    set_status(app, app->engine.youtube_protection ? "Proteção do YouTube ativada." : "Proteção do YouTube desativada.");
+    const char *message = app->engine.youtube_protection
+                              ? "Proteção do YouTube ativada."
+                              : "Proteção do YouTube desativada.";
+    set_status(app, message);
 }
 
 static void output_changed(GtkEditable *editable, gpointer userdata)

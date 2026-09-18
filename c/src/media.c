@@ -27,7 +27,9 @@ void dld_command_clear(DldCommand *command)
 {
     if (command == NULL) return;
     if (command->argv != NULL) {
-        for (size_t i = 0; i < command->argc; ++i) free(command->argv[i]);
+        for (size_t i = 0; i < command->argc; ++i) {
+            free(command->argv[i]);
+        }
     }
     free(command->argv);
     dld_command_init(command);
@@ -115,7 +117,11 @@ bool dld_validate_netscape_cookie_file(const char *path, DldAppError *error)
         while (isspace((unsigned char)*start)) ++start;
         if (*start == '\0' || *start == '#') continue;
         unsigned tabs = 0U;
-        for (const char *p = start; *p != '\0'; ++p) if (*p == '\t') ++tabs;
+        for (const char *p = start; *p != '\0'; ++p) {
+            if (*p == '\t') {
+                ++tabs;
+            }
+        }
         if (tabs >= 6U) {
             valid = true;
             break;
@@ -243,7 +249,11 @@ bool dld_build_download_command(const char *yt_dlp, const char *url,
     if (!begin_command(command, yt_dlp, error)) return false;
     if (!playlist && !command_push(command, "--no-playlist")) goto oom;
     if (!command_push(command, "--newline") ||
-        !command_push_pair(command, "--progress-template", "percent=%(progress._percent_str)s eta=%(progress.eta)s speed=%(progress._speed_str)s")) goto oom;
+        !command_push_pair(command, "--progress-template",
+                           "percent=%(progress._percent_str)s eta=%(progress.eta)s "
+                           "speed=%(progress._speed_str)s")) {
+        goto oom;
+    }
     if (youtube_protection) {
         if (!command_push_pair(command, "--sleep-interval", "5") ||
             !command_push_pair(command, "--retries", "3") ||
