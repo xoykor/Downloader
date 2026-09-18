@@ -1,6 +1,14 @@
 #ifndef DOWNLOADER_MEDIA_H
 #define DOWNLOADER_MEDIA_H
 
+/*
+ * Planejamento de mídia, parsing e construção de argv.
+ *
+ * `DldCommand` possui o vetor `argv` e cada string contida nele. Depois de usar o
+ * comando, sempre chame `dld_command_clear`. Nenhum comando é concatenado numa
+ * linha de shell: cada argumento continua sendo um elemento separado de `argv`.
+ */
+
 #include "downloader/domain.h"
 
 #include <stdbool.h>
