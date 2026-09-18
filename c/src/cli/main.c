@@ -1,3 +1,11 @@
+/*
+ * Adaptador de linha de comando.
+ *
+ * A CLI só transforma argumentos do usuário em chamadas da engine. Regras de
+ * mídia, persistência e execução permanecem no núcleo para não haver duas
+ * implementações diferentes do mesmo comportamento.
+ */
+
 #include "downloader/engine.h"
 
 #include <json-c/json.h>
@@ -93,7 +101,10 @@ static int command_deps(DldEngine *engine)
 
 static int command_analyze(DldEngine *engine, int argc, char **argv)
 {
-    if (argc < 3) { print_help(); return EXIT_FAILURE; }
+    if (argc < 3) {
+        print_help();
+        return EXIT_FAILURE;
+    }
     bool playlist = false;
     bool has_auth = false;
     DldAuthRef auth;
@@ -110,7 +121,8 @@ static int command_analyze(DldEngine *engine, int argc, char **argv)
     }
     if (error.message != NULL) {
         print_error(&error);
-        dld_auth_ref_clear(&auth); dld_app_error_clear(&error);
+        dld_auth_ref_clear(&auth);
+        dld_app_error_clear(&error);
         return EXIT_FAILURE;
     }
     DldMediaSummary summary;
@@ -133,7 +145,10 @@ static int command_analyze(DldEngine *engine, int argc, char **argv)
 
 static int command_download(DldEngine *engine, int argc, char **argv)
 {
-    if (argc < 3) { print_help(); return EXIT_FAILURE; }
+    if (argc < 3) {
+        print_help();
+        return EXIT_FAILURE;
+    }
     const char *destination = NULL;
     const char *format = "auto";
     const char *kind = "video+audio";
@@ -160,7 +175,10 @@ static int command_download(DldEngine *engine, int argc, char **argv)
         }
     }
     if (error.message != NULL) {
-        print_error(&error); dld_auth_ref_clear(&auth); dld_app_error_clear(&error); return EXIT_FAILURE;
+        print_error(&error);
+        dld_auth_ref_clear(&auth);
+        dld_app_error_clear(&error);
+        return EXIT_FAILURE;
     }
 
     struct json_object *options = json_object_new_object();
@@ -186,7 +204,9 @@ static int command_download(DldEngine *engine, int argc, char **argv)
 
     if (task.id == NULL || task.input_url == NULL || task.options_json == NULL) {
         fprintf(stderr, "erro: memória insuficiente\n");
-        dld_task_record_clear(&task); dld_app_error_clear(&error); return EXIT_FAILURE;
+        dld_task_record_clear(&task);
+        dld_app_error_clear(&error);
+        return EXIT_FAILURE;
     }
     atomic_bool cancelled = false;
     const bool ok = dld_engine_execute_task(engine, &task, &cancelled, print_event, NULL, &error);
@@ -198,7 +218,10 @@ static int command_download(DldEngine *engine, int argc, char **argv)
 
 static int command_convert(DldEngine *engine, int argc, char **argv)
 {
-    if (argc < 3) { print_help(); return EXIT_FAILURE; }
+    if (argc < 3) {
+        print_help();
+        return EXIT_FAILURE;
+    }
     const char *format = argc >= 4 && argv[3][0] != '-' ? argv[3] : "mp4";
     const char *destination = argc >= 5 && argv[4][0] != '-' ? argv[4] : NULL;
     const char *acceleration = "auto";
@@ -207,7 +230,10 @@ static int command_convert(DldEngine *engine, int argc, char **argv)
     if (argc >= 5 && argv[4][0] != '-') start = 5;
     for (int i = start; i < argc; ++i) {
         if (strcmp(argv[i], "--acceleration") == 0 && i + 1 < argc) acceleration = argv[++i];
-        else { print_help(); return EXIT_FAILURE; }
+        else {
+            print_help();
+            return EXIT_FAILURE;
+        }
     }
 
     struct json_object *options = json_object_new_object();
@@ -247,14 +273,21 @@ int main(int argc, char **argv)
     dld_app_error_init(&error);
     if (!dld_engine_open(&engine, &config, &error)) {
         print_error(&error);
-        dld_engine_clear(&engine); dld_app_error_clear(&error);
+        dld_engine_clear(&engine);
+        dld_app_error_clear(&error);
         return EXIT_FAILURE;
     }
     int result = EXIT_FAILURE;
     if (strcmp(argv[1], "deps") == 0) result = command_deps(&engine);
-    else if (strcmp(argv[1], "analyze") == 0 || strcmp(argv[1], "analisar") == 0) result = command_analyze(&engine, argc, argv);
-    else if (strcmp(argv[1], "download") == 0 || strcmp(argv[1], "baixar") == 0) result = command_download(&engine, argc, argv);
-    else if (strcmp(argv[1], "convert") == 0 || strcmp(argv[1], "converter") == 0) result = command_convert(&engine, argc, argv);
+    else if (strcmp(argv[1], "analyze") == 0 || strcmp(argv[1], "analisar") == 0) {
+        result = command_analyze(&engine, argc, argv);
+    }
+    else if (strcmp(argv[1], "download") == 0 || strcmp(argv[1], "baixar") == 0) {
+        result = command_download(&engine, argc, argv);
+    }
+    else if (strcmp(argv[1], "convert") == 0 || strcmp(argv[1], "converter") == 0) {
+        result = command_convert(&engine, argc, argv);
+    }
     else print_help();
     dld_engine_clear(&engine);
     dld_app_error_clear(&error);
