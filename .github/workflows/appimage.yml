@@ -74,7 +74,9 @@ jobs:
           VERSION="$(printf '%s' "$COMMIT_MESSAGE" | sed -n 's/.*\[release-\(v[^]]*\)\].*/\1/p')"
           test -n "$VERSION"
 
-          if ! git rev-parse "$VERSION" >/dev/null 2>&1; then
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
+            git fetch --depth=1 origin "refs/tags/$VERSION:refs/tags/$VERSION"
+          else
             git tag "$VERSION" "$GITHUB_SHA"
             git push origin "$VERSION"
           fi
