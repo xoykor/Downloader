@@ -47,6 +47,8 @@ int main(void)
     bool saw_max_downloads = false;
     bool saw_ignore_config = false;
     bool saw_no_simulate = false;
+    bool saw_sleep_interval_one = false;
+    bool saw_sleep_requests = false;
     for (size_t i = 0; i < command.argc; ++i) {
         if (strcmp(command.argv[i], "--yes-playlist") == 0) saw_yes_playlist = true;
         if (strcmp(command.argv[i], "--ignore-errors") == 0) saw_ignore_errors = true;
@@ -60,11 +62,21 @@ int main(void)
         }
         if (strcmp(command.argv[i], "--ignore-config") == 0) saw_ignore_config = true;
         if (strcmp(command.argv[i], "--no-simulate") == 0) saw_no_simulate = true;
+        if (strcmp(command.argv[i], "--sleep-interval") == 0 &&
+            i + 1U < command.argc &&
+            strcmp(command.argv[i + 1U], "1") == 0) {
+            saw_sleep_interval_one = true;
+        }
+        if (strcmp(command.argv[i], "--sleep-requests") == 0) {
+            saw_sleep_requests = true;
+        }
     }
     assert(saw_yes_playlist && saw_ignore_errors);
     assert(saw_track_template && saw_after_move);
     assert(saw_before_dl && saw_max_downloads);
     assert(saw_ignore_config && saw_no_simulate);
+    assert(saw_sleep_interval_one);
+    assert(!saw_sleep_requests);
 
     DldTrackLine track;
     assert(dld_parse_track_line(
