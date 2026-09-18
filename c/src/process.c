@@ -319,7 +319,8 @@ io_failure:
         close_fd(&err_pipe[0]);
         buffer_clear(&stdout_buffer);
         buffer_clear(&stderr_buffer);
-        buffer_clear(&line_buffer);
+        buffer_clear(&stdout_line_buffer);
+        buffer_clear(&stderr_line_buffer);
         (void)dld_app_error_set(error, DLD_ERROR_INTERNAL, "Falha ao ler saída do processo.",
                                 "processo", true, saved);
         return false;
