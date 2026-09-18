@@ -1,60 +1,45 @@
-# Downloader em C
+# Implementação C17
 
-Esta pasta contém a migração incremental do Downloader para **C17**. A versão
-Rust continua intacta durante a transição para que cada etapa possa ser
-comparada e validada antes de substituir a implementação anterior.
+Esta é a implementação principal do Downloader.
 
-## Estado atual
+## Organização
 
-A primeira etapa porta os contratos essenciais do domínio e a máquina de
-estados da fila:
+```text
+c/
+├── include/downloader/   API pública do núcleo
+├── src/
+│   ├── domain.c          contratos e ownership
+│   ├── application.c     máquina de estados da fila
+│   ├── process.c         fork/exec, pipes, timeout e cancelamento
+│   ├── media.c           yt-dlp, ffprobe, FFmpeg e JSON
+│   ├── database.c        SQLite
+│   ├── publish.c         publicação atômica e colisões
+│   ├── hardware.c        sondagem de aceleração
+│   ├── library.c         índice de downloads concluídos
+│   ├── engine.c          orquestração real
+│   ├── cli/main.c        CLI
+│   └── desktop/main.c    GTK4
+└── tests/                testes unitários e integração local
+```
 
-- estados e tipos de tarefa;
-- regras de tarefa ativa/terminal;
-- registros com cópia profunda e destruição explícita;
-- fila FIFO com limites separados para downloads e conversões;
-- cancelamento, repetição, conclusão e recuperação após reinício;
-- testes determinísticos sem rede, GPU, FFmpeg ou yt-dlp.
+## Regras de legibilidade
 
-Ainda **não** foram portados nesta etapa: execução de processos, SQLite, parsing
-JSON de yt-dlp/ffprobe, planejamento FFmpeg e interface GTK4.
+- C17 padrão; POSIX só onde o Linux realmente precisa (`fork`, `exec`, `poll`).
+- cada função deixa explícito quem aloca e quem libera memória;
+- prefixo `dld_` em símbolos públicos;
+- comentários explicam motivo, ownership e invariantes, não repetem sintaxe;
+- processos externos recebem `argv` separado e nunca passam por shell;
+- operações de publicação só removem o temporário depois que o destino está
+  completo;
+- warnings fortes são tratados como erro no núcleo.
 
-## Compilar
-
-Os comandos abaixo funcionam normalmente em `fish` porque não dependem de
-sintaxe específica de Bash:
+## Verificação
 
 ```sh
 cmake -S c -B build/c -DCMAKE_BUILD_TYPE=Debug
-cmake --build build/c
+cmake --build build/c --parallel
 ctest --test-dir build/c --output-on-failure
 ```
 
-A CLI provisória pode ser executada com:
-
-```sh
-./build/c/downloader-c-cli version
-./build/c/downloader-c-cli queue-demo
-```
-
-## Convenções de legibilidade
-
-O código segue algumas regras deliberadas para continuar fácil de revisar por
-humanos:
-
-1. C17 padrão sempre que possível; extensões de compilador não fazem parte da API.
-2. Ownership de memória é documentado na fronteira das funções.
-3. Nomes usam o prefixo `dld_` para evitar colisões em C.
-4. Comentários explicam decisões, invariantes e motivos; não repetem a linha seguinte.
-5. Operações que podem falhar reservam/copiam dados antes de alterar o estado.
-6. `-Wall -Wextra -Wpedantic -Wconversion -Wshadow` são habilitados no núcleo.
-7. Testes espelham regras importantes já cobertas pela implementação Rust.
-
-## Próximas etapas
-
-1. portar `media`: parsing de yt-dlp/ffprobe e planejamento de argumentos;
-2. portar `infra/process`: execução segura sem shell;
-3. portar SQLite e publicação atômica;
-4. conectar a CLI real (`analyze`, `download`, `convert`);
-5. portar o desktop para GTK4/Wayland;
-6. atualizar AppImage e remover Rust apenas depois de atingir paridade.
+Os testes cobrem domínio, fila, parsing/comandos de mídia, processos,
+publicação, SQLite, biblioteca e uma conversão real FFmpeg + ffprobe.

@@ -9,11 +9,10 @@ extern "C" {
 #endif
 
 /*
- * Tipos de domínio compartilhados por CLI, interface gráfica e serviços.
+ * Tipos compartilhados pelo núcleo, CLI e interface gráfica.
  *
- * Esta camada não executa processos, não acessa rede e não abre banco de dados.
- * A ideia é manter aqui apenas dados e regras simples de estado, espelhando o
- * papel do crate `downloader-domain` da implementação Rust.
+ * Esta camada não acessa rede, disco, banco ou processos. Manter os contratos
+ * independentes da infraestrutura reduz acoplamento e torna os testes baratos.
  */
 
 typedef enum {
@@ -54,6 +53,12 @@ typedef enum {
 } DldCollisionPolicy;
 
 typedef enum {
+    DLD_AUTH_NONE = 0,
+    DLD_AUTH_COOKIE_FILE,
+    DLD_AUTH_BROWSER_PROFILE
+} DldAuthKind;
+
+typedef enum {
     DLD_ERROR_INVALID_URL = 0,
     DLD_ERROR_AUTHENTICATION,
     DLD_ERROR_DEPENDENCY,
@@ -69,6 +74,11 @@ typedef enum {
 } DldErrorCategory;
 
 typedef struct {
+    DldAuthKind kind;
+    char *id;
+} DldAuthRef;
+
+typedef struct {
     DldErrorCategory category;
     char *message;
     char *step;
@@ -82,15 +92,13 @@ typedef struct {
     char *input_url;
     char *input_path;
 
-    /*
-     * Durante a migração, as opções continuam armazenadas como um único JSON.
-     * Isso mantém compatibilidade conceitual com o Rust e evita duplicar um
-     * grande número de campos antes da camada JSON ser portada.
-     */
+    /* JSON é mantido como texto para preservar compatibilidade e extensibilidade. */
     char *options_json;
 
     char *destination;
     DldCollisionPolicy collision;
+    bool has_auth;
+    DldAuthRef auth;
     DldTaskStatus status;
     char *temporary_path;
 
@@ -101,30 +109,36 @@ typedef struct {
     uint64_t updated_at_ms;
 } DldTaskRecord;
 
-/* Regras de estado mantidas equivalentes às da versão Rust. */
 bool dld_task_status_is_terminal(DldTaskStatus status);
 bool dld_task_status_is_active(DldTaskStatus status);
 
-/* Conversões apenas para logs, testes e UI. As strings retornadas são estáticas. */
 const char *dld_task_kind_name(DldTaskKind kind);
+bool dld_task_kind_from_name(const char *name, DldTaskKind *kind);
 const char *dld_task_status_name(DldTaskStatus status);
+bool dld_task_status_from_name(const char *name, DldTaskStatus *status);
+const char *dld_collision_policy_name(DldCollisionPolicy policy);
+bool dld_collision_policy_from_name(const char *name, DldCollisionPolicy *policy);
+const char *dld_auth_kind_name(DldAuthKind kind);
+bool dld_auth_kind_from_name(const char *name, DldAuthKind *kind);
 
-/* Gerenciamento explícito de memória para os tipos que possuem strings. */
+void dld_auth_ref_init(DldAuthRef *auth);
+void dld_auth_ref_clear(DldAuthRef *auth);
+bool dld_auth_ref_set(DldAuthRef *auth, DldAuthKind kind, const char *id);
+bool dld_auth_ref_copy(DldAuthRef *destination, const DldAuthRef *source);
+
 void dld_app_error_init(DldAppError *error);
 void dld_app_error_clear(DldAppError *error);
-bool dld_app_error_set(
-    DldAppError *error,
-    DldErrorCategory category,
-    const char *message,
-    const char *step,
-    bool has_code,
-    int code
-);
+bool dld_app_error_set(DldAppError *error, DldErrorCategory category,
+                       const char *message, const char *step,
+                       bool has_code, int code);
 bool dld_app_error_copy(DldAppError *destination, const DldAppError *source);
 
 void dld_task_record_init(DldTaskRecord *task);
 void dld_task_record_clear(DldTaskRecord *task);
 bool dld_task_record_copy(DldTaskRecord *destination, const DldTaskRecord *source);
+
+/* Utilitário C17 usado pelos módulos que precisam assumir ownership de texto. */
+char *dld_string_duplicate(const char *text);
 
 #ifdef __cplusplus
 }

@@ -3,7 +3,6 @@
 
 #include "downloader/domain.h"
 
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -11,20 +10,11 @@
 extern "C" {
 #endif
 
-/* Limites equivalentes aos defaults atuais do Rust: 2 downloads e 1 conversão. */
 typedef struct {
     size_t max_downloads;
     size_t max_conversions;
 } DldQueueLimits;
 
-/*
- * Evento leve para consumo imediato por CLI/UI.
- *
- * `task_id`, `message` e `destination` são referências emprestadas. O chamador
- * não deve liberá-las nem mantê-las depois que o estado correspondente mudar.
- * Quando a camada de eventos assíncronos for portada, ela poderá fazer uma
- * cópia profunda deste snapshot na fronteira entre threads.
- */
 typedef struct {
     const char *task_id;
     uint64_t sequence;
@@ -39,13 +29,6 @@ typedef enum {
     DLD_START_ERROR
 } DldStartResult;
 
-/*
- * Estado da fila.
- *
- * As tarefas ficam em um vetor que só cresce enquanto o estado está aberto.
- * A fila pendente guarda índices nesse vetor; por isso uma realocação do vetor
- * não invalida a ordem da fila.
- */
 typedef struct {
     DldTaskRecord *tasks;
     size_t task_count;
@@ -62,64 +45,28 @@ typedef struct {
 } DldApplicationState;
 
 DldQueueLimits dld_queue_limits_default(void);
-
 void dld_application_state_init(DldApplicationState *state, DldQueueLimits limits);
 void dld_application_state_clear(DldApplicationState *state);
 
 size_t dld_application_task_count(const DldApplicationState *state);
 const DldTaskRecord *dld_application_task_at(const DldApplicationState *state, size_t index);
+DldTaskRecord *dld_application_find_task_mut(DldApplicationState *state, const char *id);
 const DldTaskRecord *dld_application_find_task(const DldApplicationState *state, const char *id);
 
-/* Restaura uma tarefa persistida sem emitir evento, como a versão Rust. */
-bool dld_application_restore(
-    DldApplicationState *state,
-    const DldTaskRecord *task,
-    DldAppError *error
-);
-
-/* Copia a tarefa para o estado; o chamador continua dono do registro original. */
-bool dld_application_enqueue(
-    DldApplicationState *state,
-    const DldTaskRecord *task,
-    DldTaskEvent *event,
-    DldAppError *error
-);
-
-/*
- * Marca tarefas que estavam ativas como interrompidas após reinício.
- * Retorna quantas tarefas foram alteradas. Eventos individuais entram numa
- * etapa posterior, junto do barramento assíncrono da aplicação.
- */
+bool dld_application_restore(DldApplicationState *state, const DldTaskRecord *task,
+                             DldAppError *error);
+bool dld_application_enqueue(DldApplicationState *state, const DldTaskRecord *task,
+                             DldTaskEvent *event, DldAppError *error);
 size_t dld_application_recover_after_restart(DldApplicationState *state);
-
-bool dld_application_cancel(
-    DldApplicationState *state,
-    const char *id,
-    DldTaskEvent *event,
-    DldAppError *error
-);
-
-bool dld_application_retry(
-    DldApplicationState *state,
-    const char *id,
-    DldTaskEvent *event,
-    DldAppError *error
-);
-
-DldStartResult dld_application_start_next(
-    DldApplicationState *state,
-    DldTaskEvent *event,
-    DldAppError *error
-);
-
-bool dld_application_finish(
-    DldApplicationState *state,
-    const char *id,
-    DldTaskStatus final_status,
-    const DldAppError *task_error,
-    DldTaskEvent *event,
-    DldAppError *error
-);
+bool dld_application_cancel(DldApplicationState *state, const char *id,
+                            DldTaskEvent *event, DldAppError *error);
+bool dld_application_retry(DldApplicationState *state, const char *id,
+                           DldTaskEvent *event, DldAppError *error);
+DldStartResult dld_application_start_next(DldApplicationState *state,
+                                          DldTaskEvent *event, DldAppError *error);
+bool dld_application_finish(DldApplicationState *state, const char *id,
+                            DldTaskStatus final_status, const DldAppError *task_error,
+                            DldTaskEvent *event, DldAppError *error);
 
 #ifdef __cplusplus
 }
