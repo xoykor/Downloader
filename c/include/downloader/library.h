@@ -1,6 +1,14 @@
 #ifndef DOWNLOADER_LIBRARY_H
 #define DOWNLOADER_LIBRARY_H
 
+/*
+ * Índice local de downloads concluídos.
+ *
+ * O índice é auxiliar: um registro só pode apontar para um arquivo real dentro
+ * da pasta de destino. O chamador assume ownership de `*path` quando uma busca
+ * encontra resultado.
+ */
+
 #include "downloader/domain.h"
 
 #include <stdbool.h>

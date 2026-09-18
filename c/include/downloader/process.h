@@ -1,6 +1,13 @@
 #ifndef DOWNLOADER_PROCESS_H
 #define DOWNLOADER_PROCESS_H
 
+/*
+ * Executor de processos externos.
+ *
+ * `DldProcessSpec` empresta todas as strings. `DldProcessResult` possui as cópias
+ * de stdout/stderr e precisa de `dld_process_result_clear` após o uso.
+ */
+
 #include "downloader/domain.h"
 
 #include <stdatomic.h>
