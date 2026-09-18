@@ -192,6 +192,8 @@ static const char *status_label(DldTaskStatus status)
     }
 }
 
+static void cancel_clicked(GtkButton *button, gpointer userdata);
+
 static gboolean status_is_terminal(DldTaskStatus status)
 {
     return status == DLD_STATUS_COMPLETED ||
