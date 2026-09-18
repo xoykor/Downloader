@@ -2,14 +2,14 @@ name: C17
 
 on:
   push:
-    branches: [master, c-port]
+    branches: [master]
     paths:
       - "c/**"
-      - ".github/workflows/c-port.yml"
+      - ".github/workflows/c17.yml"
   pull_request:
     paths:
       - "c/**"
-      - ".github/workflows/c-port.yml"
+      - ".github/workflows/c17.yml"
   workflow_dispatch:
 
 jobs:
