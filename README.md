@@ -1,78 +1,77 @@
 # Downloader
 
-A implementação entregue está em Rust. O protótipo Python legado foi retirado
-do workspace durante a limpeza final; o histórico da migração está no handoff.
+Downloader de mídia para Linux escrito em **C17**, com interface **GTK4** e CLI.
+O aplicativo usa `yt-dlp` para extração/download e `ffmpeg`/`ffprobe` para
+conversão e validação. Esses programas são executados diretamente com
+`fork`/`exec`, nunca através de shell.
 
-## Executar
+## Recursos
 
-```bash
-cd rust
-cargo build --release --locked
-./target/release/downloader-desktop
+- downloads de vídeo + áudio, somente vídeo ou somente áudio;
+- qualidade máxima de 480p a 2160p;
+- MP4, MKV, WebM, MP3, Opus, M4A, FLAC e WAV;
+- playlists;
+- cookies Netscape e perfis de navegador suportados pelo yt-dlp;
+- fila desktop com até 2 downloads e 1 conversão em paralelo;
+- cancelamento de tarefas ativas ou ainda na fila;
+- SQLite para histórico e estado;
+- validação com ffprobe antes de publicar qualquer arquivo;
+- política de colisão segura (renomear/substituir/pular);
+- detecção e sondagem de Vulkan, VAAPI, AMF, CUDA/NVENC e QSV;
+- fallback automático para software quando a aceleração falha;
+- índice `.downloader-library.json` para evitar downloads repetidos;
+- limite conservador persistente para YouTube: 5 s entre downloads e até 300
+  inícios em uma janela móvel de 90 minutos, quando a proteção está ativada.
+
+## Dependências de compilação
+
+Em distribuições Arch/CachyOS:
+
+```sh
+sudo pacman -S --needed base-devel cmake pkgconf gtk4 json-c sqlite ffmpeg
 ```
 
-Em ambiente sem compositor gráfico, use a CLI:
+`yt-dlp` é necessário em execução se você não usar o AppImage.
 
-```bash
-./target/release/downloader-cli analyze <url> [--playlist]
-./target/release/downloader-cli download <url> [diretório] [--playlist]
-./target/release/downloader-cli convert <arquivo> [mp4|mkv|mp3|webm] [diretório]
+## Compilar
+
+Os comandos abaixo funcionam normalmente em fish:
+
+```sh
+cmake -S c -B build/c -DCMAKE_BUILD_TYPE=Release
+cmake --build build/c --parallel
+ctest --test-dir build/c --output-on-failure
 ```
 
-Para conteúdo que exige sessão, a interface tenta automaticamente o primeiro
-perfil local compatível. Também é possível informar um `cookies.txt` no formato
-Netscape (`--cookies /caminho/cookies.txt`) ou um perfil (`--browser
-firefox[:perfil]`) nos comandos `analyze` e `download`.
+Binários:
 
-## Abrir com dois cliques (Linux)
-
-Compile e instale o atalho do aplicativo no menu do usuário:
-
-```bash
-cd /home/x/Documentos/Estudo/Downloader
-./packaging/install-desktop.sh
+```text
+build/c/downloader-desktop
+build/c/downloader-cli
 ```
 
-Depois, procure por **Downloader** no menu de aplicativos. Também é possível
-copiar [`packaging/Downloader.desktop`](packaging/Downloader.desktop) para a
-área de trabalho e abrir diretamente; o gerenciador pode pedir **Permitir
-iniciar** na primeira execução.
+## CLI
 
-Na tela Downloads é possível escolher vídeo + áudio, somente vídeo ou áudio,
-qualidade de 480p a 2160p, formato MP4/MKV/WebM/MP3/Opus, taxa de bits e playlist.
-Downloads usam o título do vídeo no nome do arquivo, incorporam a thumbnail
-como capa nos formatos compatíveis e mostram progresso separado por faixa.
-O programa requer `yt-dlp`, `ffmpeg` e `ffprobe` no `PATH`. A fila é salva em
-`~/.downloader/tasks.sqlite`; arquivos temporários só são publicados depois da
-validação com `ffprobe`. Aceleração Vulkan/VAAPI/AMF/CUDA/QSV é usada apenas
-quando a sondagem do dispositivo passa; caso contrário, a conversão recua para
-software.
-
-## Verificação
-
-```bash
-cd rust
-cargo test --workspace --locked
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
+```text
+downloader-cli deps
+downloader-cli analyze <url> [--playlist]
+downloader-cli download <url> [diretório] [opções]
+downloader-cli convert <arquivo> [formato] [diretório] [--acceleration modo]
 ```
 
-O estado detalhado, limites conhecidos, autenticação e o roteiro dos quatro agentes estão em
-[`docs/HANDOFF-estado-e-conclusao-2026-09-15.md`](docs/HANDOFF-estado-e-conclusao-2026-09-15.md).
+Use `downloader-cli --help` para a lista completa de opções.
 
-Para entender os módulos e os fluxos, consulte [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-e o [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md).
+## Dados
 
-## Distribuição AppImage
+O estado fica por padrão em `~/.downloader/tasks.sqlite`. Para testes ou
+instalações isoladas, use `DOWNLOADER_DATA_DIR`.
 
-O workflow do GitHub gera um pacote `Downloader-x86_64.AppImage` com o
-executável, `yt-dlp`, FFmpeg e ffprobe. Pushes com tags como `v0.1.0` também
-publicam o arquivo em uma GitHub Release. Veja
-[`packaging/README.md`](packaging/README.md).
+Arquivos baixados ou convertidos são produzidos em uma área temporária,
+validados e só depois publicados no destino. Cookies nunca são copiados para o
+banco; somente a referência ao arquivo/perfil é persistida.
 
-## Proteção do YouTube
+## Código
 
-Pausa de 5 segundos entre downloads e até 300 inícios de vídeo por janela móvel
-de 90 minutos, com contagem persistente e espera automática. A proteção pode ser
-ativada ou desativada em Configurações (vem ativada por padrão). Falhas
-temporárias recebem até três novas tentativas. Veja [limites e fontes](docs/YOUTUBE_LIMITS.md).
+A implementação principal está em [`c/`](c/). A arquitetura está documentada
+em [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) e o uso em
+[`docs/USER_GUIDE.md`](docs/USER_GUIDE.md).

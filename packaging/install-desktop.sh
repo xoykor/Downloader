@@ -1,31 +1,25 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env sh
+set -eu
 
-project_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-binary="$project_dir/rust/target/release/downloader-desktop"
-user_home="${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6)}"
-bin_dir="$user_home/.local/bin"
-applications_dir="$user_home/.local/share/applications"
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+build_dir="$project_dir/build/c-release"
+bin_dir="$HOME/.local/bin"
+app_dir="$HOME/.local/share/applications"
+icon_dir="$HOME/.local/share/icons/hicolor/scalable/apps"
 
-if [[ ! -x "$binary" ]]; then
-  echo "Compilando Downloader em modo release..."
-  (cd "$project_dir/rust" && cargo build --release --locked)
-fi
+cmake -S "$project_dir/c" -B "$build_dir" -DCMAKE_BUILD_TYPE=Release
+cmake --build "$build_dir" --parallel
 
-mkdir -p "$bin_dir" "$applications_dir"
-install -m 0755 "$binary" "$bin_dir/downloader-desktop"
-cat > "$applications_dir/downloader.desktop" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Downloader
-Comment=Baixe e converta mídia com yt-dlp e FFmpeg
-Exec=$bin_dir/downloader-desktop
-TryExec=$bin_dir/downloader-desktop
-Path=$project_dir/rust
-Terminal=false
-Categories=AudioVideo;
-StartupNotify=true
-EOF
+mkdir -p "$bin_dir" "$app_dir" "$icon_dir"
+install -m 0755 "$build_dir/downloader-desktop" "$bin_dir/downloader-desktop"
+install -m 0755 "$build_dir/downloader-cli" "$bin_dir/downloader-cli"
+install -m 0644 "$project_dir/packaging/io.github.xoykor.Downloader.svg" \
+  "$icon_dir/io.github.xoykor.Downloader.svg"
 
-echo "Atalho instalado em: $applications_dir/downloader.desktop"
-echo "Abra o menu de aplicativos e procure por Downloader."
+# O arquivo instalado recebe caminho absoluto para não depender do PATH da sessão gráfica.
+sed "s|^Exec=.*|Exec=$bin_dir/downloader-desktop %U|" \
+  "$project_dir/packaging/io.github.xoykor.Downloader.desktop" \
+  > "$app_dir/io.github.xoykor.Downloader.desktop"
+chmod 0644 "$app_dir/io.github.xoykor.Downloader.desktop"
+
+echo "Downloader instalado. Procure por 'Downloader' no menu de aplicativos."
