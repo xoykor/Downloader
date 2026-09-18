@@ -1,3 +1,10 @@
+/*
+ * Planejamento de comandos de mídia e parsing das respostas estruturadas.
+ *
+ * Esta camada nunca executa processos. Ela apenas produz `argv` seguro e interpreta
+ * JSON/progresso, deixando execução, timeout e publicação para outras camadas.
+ */
+
 #include "downloader/media.h"
 
 #include <ctype.h>
@@ -54,6 +61,10 @@ void dld_probe_summary_clear(DldProbeSummary *summary)
     dld_probe_summary_init(summary);
 }
 
+/*
+ * `DldCommand` possui suas próprias cópias dos argumentos. Isso permite montar
+ * comandos com strings temporárias sem criar dependência de lifetime no chamador.
+ */
 static bool command_push(DldCommand *command, const char *argument)
 {
     char **grown = realloc(command->argv, (command->argc + 2U) * sizeof(*grown));
@@ -210,6 +221,10 @@ static bool is_audio_format(const char *format)
                               strcmp(format, "wav") == 0);
 }
 
+/*
+ * Traduz opções de interface em argumentos do yt-dlp. A ordem é intencional:
+ * opções e autenticação vêm antes da URL, e cada valor ocupa seu próprio argv.
+ */
 bool dld_build_download_command(const char *yt_dlp, const char *url,
                                 const char *output_template, bool playlist,
                                 const char *media_kind, const char *format,
@@ -359,6 +374,10 @@ static char *json_string_copy(struct json_object *object, const char *key)
     return dld_string_duplicate(json_object_get_string(value));
 }
 
+/*
+ * Para playlists, a UI precisa de contagem + uma prévia representativa. Por isso
+ * o resumo marca a resposta como playlist e usa o primeiro item para título/id.
+ */
 bool dld_parse_ytdlp_summary(const char *json_text, DldMediaSummary *summary,
                              DldAppError *error)
 {
@@ -478,6 +497,7 @@ DldProgress dld_parse_progress_line(const char *line)
     return progress;
 }
 
+/* Centraliza a validação do JSON de opções para os getters simples abaixo. */
 static struct json_object *parse_options(const char *json_text)
 {
     if (json_text == NULL || *json_text == '\0') return json_tokener_parse("{}");
