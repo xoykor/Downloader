@@ -60,6 +60,7 @@ struct DesktopApp {
     GtkWindow *window;
     GtkStack *stack;
     GtkLabel *status_label;
+    GtkLabel *sidebar_output_label;
     GtkListBox *queue_list;
 
     GtkEntry *download_url;
@@ -89,6 +90,59 @@ struct DesktopApp {
     GHashTable *row_labels;   /* task id -> GtkLabel*; widgets pertencem ao GTK. */
     GMutex jobs_mutex;
 };
+
+/*
+ * Paleta da interface Rust original, reproduzida em CSS GTK4.
+ *
+ * Mantemos o tema dentro do binário para o AppImage ter a mesma aparência em
+ * qualquer distribuição, sem depender do tema GTK instalado pelo usuário.
+ */
+static const char *APP_CSS =
+    "window, .app-root { background-color: #0c121a; color: #e8eff4; }\n"
+    ".sidebar-shell { background-color: #101720; padding: 18px; }\n"
+    ".brand { color: #68dec3; font-size: 17px; font-weight: bold; }\n"
+    ".brand-subtitle, .muted { color: #97a9b8; }\n"
+    ".sidebar-caption { color: #6f8394; font-size: 11px; font-weight: bold; }\n"
+    "stacksidebar { background-color: transparent; }\n"
+    "stacksidebar list { background-color: transparent; }\n"
+    "stacksidebar row { min-height: 44px; border-radius: 8px; margin-bottom: 5px; }\n"
+    "stacksidebar row:selected { background-color: #1c373a; }\n"
+    "stacksidebar row label { color: #e8eff4; font-size: 15px; }\n"
+    "stacksidebar row:selected label { color: #68dec3; font-weight: bold; }\n"
+    ".page { background-color: #0c121a; padding: 28px; }\n"
+    ".page-title { color: #e8eff4; font-size: 28px; font-weight: bold; }\n"
+    ".page-subtitle { color: #97a9b8; font-size: 14px; }\n"
+    ".card { background-color: #17202b; border: 1px solid #232f3d; border-radius: 12px; padding: 16px; }\n"
+    ".section-number { color: #68dec3; font-size: 12px; font-weight: bold; }\n"
+    ".section-title { color: #e8eff4; font-size: 16px; font-weight: bold; }\n"
+    ".field-label { color: #97a9b8; font-size: 12px; }\n"
+    ".hint { color: #68dec3; font-size: 12px; }\n"
+    "entry, combobox button { background-color: #212e3c; color: #e8eff4; border: 1px solid #31404f; border-radius: 7px; min-height: 38px; }\n"
+    "entry:focus, combobox button:focus { border-color: #68dec3; }\n"
+    "button { border-radius: 7px; padding: 8px 14px; }\n"
+    "button.primary { background-color: #68dec3; color: #0c121a; font-weight: bold; min-height: 40px; min-width: 160px; }\n"
+    "button.primary:hover { background-color: #7fe6ce; }\n"
+    "button.secondary { background-color: #212e3c; color: #e8eff4; border: 1px solid #31404f; }\n"
+    "checkbutton, switch { color: #e8eff4; }\n"
+    ".status-bar { background-color: #0c121a; border-top: 1px solid #17202b; padding: 10px 24px; }\n"
+    ".status-dot { color: #68dec3; font-size: 16px; }\n"
+    ".queue-list, .queue-list row { background-color: transparent; }\n"
+    ".queue-row { background-color: #17202b; border: 1px solid #232f3d; border-radius: 12px; padding: 14px; margin: 5px 0; }\n";
+
+static void apply_theme(void)
+{
+    GtkCssProvider *provider = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(provider, APP_CSS, -1);
+
+    GdkDisplay *display = gdk_display_get_default();
+    if (display != NULL) {
+        gtk_style_context_add_provider_for_display(
+            display,
+            GTK_STYLE_PROVIDER(provider),
+            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    }
+    g_object_unref(provider);
+}
 
 static char *make_task_id(const char *prefix)
 {
@@ -214,14 +268,18 @@ static void cancel_clicked(GtkButton *button, gpointer userdata)
 
 static void add_queue_row(DesktopApp *app, const char *task_id, DldTaskStatus status)
 {
-    GtkWidget *row_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *row_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    gtk_widget_add_css_class(row_box, "queue-row");
+
     GtkWidget *label = gtk_label_new(NULL);
     gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(label), TRUE);
     gtk_widget_set_hexpand(label, TRUE);
     char text[512];
     (void)snprintf(text, sizeof(text), "%s  —  %s", task_id, status_label(status));
     gtk_label_set_text(GTK_LABEL(label), text);
     GtkWidget *cancel = gtk_button_new_with_label("Cancelar");
+    gtk_widget_add_css_class(cancel, "secondary");
     g_object_set_data_full(G_OBJECT(cancel), "task-id", g_strdup(task_id), g_free);
     g_signal_connect(cancel, "clicked", G_CALLBACK(cancel_clicked), app);
     gtk_box_append(GTK_BOX(row_box), label);
@@ -492,6 +550,10 @@ static void output_changed(GtkEditable *editable, gpointer userdata)
     if (copy == NULL) return;
     free(app->engine.output_dir);
     app->engine.output_dir = copy;
+
+    if (app->sidebar_output_label != NULL) {
+        gtk_label_set_text(app->sidebar_output_label, text);
+    }
 }
 
 static void dependencies_clicked(GtkButton *button, gpointer userdata)
@@ -507,41 +569,105 @@ static void dependencies_clicked(GtkButton *button, gpointer userdata)
     dld_app_error_clear(&error);
 }
 
-static GtkWidget *labeled_row(const char *label_text, GtkWidget *control)
+static GtkWidget *make_page(const char *title_text, const char *subtitle_text)
 {
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 16);
+    gtk_widget_add_css_class(page, "page");
+
+    GtkWidget *title = gtk_label_new(title_text);
+    gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
+    gtk_widget_add_css_class(title, "page-title");
+    gtk_box_append(GTK_BOX(page), title);
+
+    GtkWidget *subtitle = gtk_label_new(subtitle_text);
+    gtk_label_set_xalign(GTK_LABEL(subtitle), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(subtitle), TRUE);
+    gtk_widget_add_css_class(subtitle, "page-subtitle");
+    gtk_box_append(GTK_BOX(page), subtitle);
+
+    return page;
+}
+
+static GtkWidget *make_card(void)
+{
+    GtkWidget *card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    gtk_widget_add_css_class(card, "card");
+    return card;
+}
+
+static void append_section_title(GtkWidget *card, const char *number, const char *title_text)
+{
+    GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+
+    GtkWidget *number_label = gtk_label_new(number);
+    gtk_widget_add_css_class(number_label, "section-number");
+
+    GtkWidget *title = gtk_label_new(title_text);
+    gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
+    gtk_widget_add_css_class(title, "section-title");
+
+    gtk_box_append(GTK_BOX(header), number_label);
+    gtk_box_append(GTK_BOX(header), title);
+    gtk_box_append(GTK_BOX(card), header);
+}
+
+static GtkWidget *make_field(const char *label_text, GtkWidget *control)
+{
+    GtkWidget *field = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     GtkWidget *label = gtk_label_new(label_text);
     gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
-    gtk_widget_set_size_request(label, 150, -1);
+    gtk_widget_add_css_class(label, "field-label");
     gtk_widget_set_hexpand(control, TRUE);
-    gtk_box_append(GTK_BOX(box), label);
-    gtk_box_append(GTK_BOX(box), control);
-    return box;
+    gtk_box_append(GTK_BOX(field), label);
+    gtk_box_append(GTK_BOX(field), control);
+    return field;
+}
+
+static GtkWidget *wrap_page(GtkWidget *page)
+{
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(
+        GTK_SCROLLED_WINDOW(scroll),
+        GTK_POLICY_NEVER,
+        GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), page);
+    gtk_widget_set_hexpand(scroll, TRUE);
+    gtk_widget_set_vexpand(scroll, TRUE);
+    return scroll;
 }
 
 static GtkWidget *make_download_page(DesktopApp *app)
 {
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_widget_set_margin_top(box, 18);
-    gtk_widget_set_margin_bottom(box, 18);
-    gtk_widget_set_margin_start(box, 18);
-    gtk_widget_set_margin_end(box, 18);
-    GtkWidget *title = gtk_label_new("Downloads");
-    gtk_widget_add_css_class(title, "title-1");
-    gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
-    gtk_box_append(GTK_BOX(box), title);
+    GtkWidget *page = make_page(
+        "Sua próxima descoberta.",
+        "Baixe vídeos, músicas ou uma playlist inteira.");
+
+    GtkWidget *link_card = make_card();
+    append_section_title(link_card, "01", "Link do vídeo ou playlist");
 
     app->download_url = GTK_ENTRY(gtk_entry_new());
-    gtk_entry_set_placeholder_text(app->download_url, "https://...");
-    gtk_box_append(GTK_BOX(box), labeled_row("URL", GTK_WIDGET(app->download_url)));
+    gtk_entry_set_placeholder_text(app->download_url, "Cole o link aqui…");
+    gtk_box_append(GTK_BOX(link_card), GTK_WIDGET(app->download_url));
+
+    app->download_playlist =
+        GTK_CHECK_BUTTON(gtk_check_button_new_with_label("Baixar a playlist inteira"));
+    gtk_box_append(GTK_BOX(link_card), GTK_WIDGET(app->download_playlist));
+    gtk_box_append(GTK_BOX(page), link_card);
+
+    GtkWidget *options_card = make_card();
+    append_section_title(options_card, "02", "Como você quer salvar?");
+
+    GtkWidget *grid = gtk_grid_new();
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 18);
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 14);
+    gtk_widget_set_hexpand(grid, TRUE);
 
     app->download_type = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
-    const char *types[] = {"video+audio", "video", "audio"};
+    const char *types[] = {"Vídeo + áudio", "Somente vídeo", "Somente áudio"};
     for (size_t i = 0; i < 3U; ++i) {
         gtk_combo_box_text_append_text(app->download_type, types[i]);
     }
     gtk_combo_box_set_active(GTK_COMBO_BOX(app->download_type), 0);
-    gtk_box_append(GTK_BOX(box), labeled_row("Tipo", GTK_WIDGET(app->download_type)));
 
     app->download_format = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
     const char *formats[] = {"auto", "mp4", "mkv", "webm", "mp3", "opus", "m4a", "flac", "wav"};
@@ -549,7 +675,6 @@ static GtkWidget *make_download_page(DesktopApp *app)
         gtk_combo_box_text_append_text(app->download_format, formats[i]);
     }
     gtk_combo_box_set_active(GTK_COMBO_BOX(app->download_format), 0);
-    gtk_box_append(GTK_BOX(box), labeled_row("Formato", GTK_WIDGET(app->download_format)));
 
     app->download_quality = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
     const char *qualities[] = {"Sem limite", "480", "720", "1080", "1440", "2160"};
@@ -557,7 +682,6 @@ static GtkWidget *make_download_page(DesktopApp *app)
         gtk_combo_box_text_append_text(app->download_quality, qualities[i]);
     }
     gtk_combo_box_set_active(GTK_COMBO_BOX(app->download_quality), 0);
-    gtk_box_append(GTK_BOX(box), labeled_row("Altura máxima", GTK_WIDGET(app->download_quality)));
 
     app->download_bitrate = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
     const char *bitrates[] = {"auto", "128K", "192K", "256K", "320K"};
@@ -565,64 +689,146 @@ static GtkWidget *make_download_page(DesktopApp *app)
         gtk_combo_box_text_append_text(app->download_bitrate, bitrates[i]);
     }
     gtk_combo_box_set_active(GTK_COMBO_BOX(app->download_bitrate), 0);
-    gtk_box_append(GTK_BOX(box), labeled_row("Bitrate", GTK_WIDGET(app->download_bitrate)));
 
-    app->download_playlist = GTK_CHECK_BUTTON(gtk_check_button_new_with_label("Baixar playlist inteira"));
-    gtk_box_append(GTK_BOX(box), GTK_WIDGET(app->download_playlist));
+    gtk_grid_attach(
+        GTK_GRID(grid),
+        make_field("Conteúdo", GTK_WIDGET(app->download_type)),
+        0, 0, 1, 1);
+    gtk_grid_attach(
+        GTK_GRID(grid),
+        make_field("Formato", GTK_WIDGET(app->download_format)),
+        1, 0, 1, 1);
+    gtk_grid_attach(
+        GTK_GRID(grid),
+        make_field("Resolução", GTK_WIDGET(app->download_quality)),
+        0, 1, 1, 1);
+    gtk_grid_attach(
+        GTK_GRID(grid),
+        make_field("Taxa de bits", GTK_WIDGET(app->download_bitrate)),
+        1, 1, 1, 1);
+
+    gtk_box_append(GTK_BOX(options_card), grid);
+
+    GtkWidget *benefits = gtk_label_new(
+        "Capa automática  ·  Nome pelo título  ·  Evita duplicatas");
+    gtk_label_set_xalign(GTK_LABEL(benefits), 0.0f);
+    gtk_widget_add_css_class(benefits, "hint");
+    gtk_box_append(GTK_BOX(options_card), benefits);
+
+    GtkWidget *format_hint = gtk_label_new(
+        "Opus e MP3 salvam somente áudio. A capa é incluída quando disponível.");
+    gtk_label_set_xalign(GTK_LABEL(format_hint), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(format_hint), TRUE);
+    gtk_widget_add_css_class(format_hint, "muted");
+    gtk_box_append(GTK_BOX(options_card), format_hint);
+    gtk_box_append(GTK_BOX(page), options_card);
+
+    GtkWidget *access_card = make_card();
+    append_section_title(access_card, "03", "Acesso, destino e cookies");
+
+    GtkWidget *access_hint = gtk_label_new(
+        "Use autenticação automática ou informe uma fonte específica quando o site exigir.");
+    gtk_label_set_xalign(GTK_LABEL(access_hint), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(access_hint), TRUE);
+    gtk_widget_add_css_class(access_hint, "muted");
+    gtk_box_append(GTK_BOX(access_card), access_hint);
+
+    GtkWidget *access_grid = gtk_grid_new();
+    gtk_grid_set_column_spacing(GTK_GRID(access_grid), 18);
+    gtk_grid_set_row_spacing(GTK_GRID(access_grid), 12);
+    gtk_widget_set_hexpand(access_grid, TRUE);
 
     app->auth_kind = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
     gtk_combo_box_text_append_text(app->auth_kind, "Automático / nenhum");
     gtk_combo_box_text_append_text(app->auth_kind, "cookies.txt Netscape");
     gtk_combo_box_text_append_text(app->auth_kind, "Perfil do navegador");
     gtk_combo_box_set_active(GTK_COMBO_BOX(app->auth_kind), 0);
-    gtk_box_append(GTK_BOX(box), labeled_row("Autenticação", GTK_WIDGET(app->auth_kind)));
+
     app->auth_value = GTK_ENTRY(gtk_entry_new());
-    gtk_entry_set_placeholder_text(app->auth_value, "/caminho/cookies.txt ou firefox:default");
-    gtk_box_append(GTK_BOX(box), labeled_row("Referência", GTK_WIDGET(app->auth_value)));
+    gtk_entry_set_placeholder_text(
+        app->auth_value,
+        "/caminho/cookies.txt ou firefox:default");
 
-    GtkWidget *dest_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_grid_attach(
+        GTK_GRID(access_grid),
+        make_field("Autenticação", GTK_WIDGET(app->auth_kind)),
+        0, 0, 1, 1);
+    gtk_grid_attach(
+        GTK_GRID(access_grid),
+        make_field("Referência", GTK_WIDGET(app->auth_value)),
+        1, 0, 1, 1);
+
+    GtkWidget *destination_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     app->download_destination = GTK_ENTRY(gtk_entry_new());
-    gtk_entry_set_placeholder_text(app->download_destination, "Padrão: pasta Downloads");
-    GtkWidget *dest_button = gtk_button_new_with_label("Escolher…");
-    g_object_set_data(G_OBJECT(dest_button), "target-entry", app->download_destination);
-    g_signal_connect(dest_button, "clicked", G_CALLBACK(choose_folder_for_entry), app);
-    gtk_widget_set_hexpand(GTK_WIDGET(app->download_destination), TRUE);
-    gtk_box_append(GTK_BOX(dest_box), GTK_WIDGET(app->download_destination));
-    gtk_box_append(GTK_BOX(dest_box), dest_button);
-    gtk_box_append(GTK_BOX(box), labeled_row("Destino", dest_box));
+    gtk_entry_set_placeholder_text(
+        app->download_destination,
+        "Padrão: pasta Downloads");
 
-    GtkWidget *actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    GtkWidget *analyze = gtk_button_new_with_label("Analisar");
-    GtkWidget *download = gtk_button_new_with_label("Adicionar à fila");
-    gtk_widget_add_css_class(download, "suggested-action");
+    GtkWidget *destination_button = gtk_button_new_with_label("Escolher…");
+    gtk_widget_add_css_class(destination_button, "secondary");
+    g_object_set_data(
+        G_OBJECT(destination_button),
+        "target-entry",
+        app->download_destination);
+    g_signal_connect(
+        destination_button,
+        "clicked",
+        G_CALLBACK(choose_folder_for_entry),
+        app);
+
+    gtk_widget_set_hexpand(GTK_WIDGET(app->download_destination), TRUE);
+    gtk_box_append(GTK_BOX(destination_box), GTK_WIDGET(app->download_destination));
+    gtk_box_append(GTK_BOX(destination_box), destination_button);
+    gtk_grid_attach(
+        GTK_GRID(access_grid),
+        make_field("Destino", destination_box),
+        0, 1, 2, 1);
+
+    gtk_box_append(GTK_BOX(access_card), access_grid);
+    gtk_box_append(GTK_BOX(page), access_card);
+
+    GtkWidget *actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+
+    GtkWidget *analyze = gtk_button_new_with_label("Consultar informações");
+    gtk_widget_add_css_class(analyze, "secondary");
     g_signal_connect(analyze, "clicked", G_CALLBACK(analyze_clicked), app);
+
+    GtkWidget *download = gtk_button_new_with_label("Adicionar à fila");
+    gtk_widget_add_css_class(download, "primary");
     g_signal_connect(download, "clicked", G_CALLBACK(download_clicked), app);
+
     gtk_box_append(GTK_BOX(actions), analyze);
     gtk_box_append(GTK_BOX(actions), download);
-    gtk_box_append(GTK_BOX(box), actions);
-    return box;
+    gtk_box_append(GTK_BOX(page), actions);
+
+    return wrap_page(page);
 }
 
 static GtkWidget *make_convert_page(DesktopApp *app)
 {
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_widget_set_margin_top(box, 18);
-    gtk_widget_set_margin_bottom(box, 18);
-    gtk_widget_set_margin_start(box, 18);
-    gtk_widget_set_margin_end(box, 18);
-    GtkWidget *title = gtk_label_new("Conversor");
-    gtk_widget_add_css_class(title, "title-1");
-    gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
-    gtk_box_append(GTK_BOX(box), title);
+    GtkWidget *page = make_page(
+        "Um arquivo. Novas possibilidades.",
+        "Converta sua mídia no formato que combina com você.");
+
+    GtkWidget *card = make_card();
+    append_section_title(card, "01", "Arquivo e formato");
 
     GtkWidget *input_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     app->convert_input = GTK_ENTRY(gtk_entry_new());
+    gtk_entry_set_placeholder_text(app->convert_input, "Caminho do arquivo de mídia");
+
     GtkWidget *browse = gtk_button_new_with_label("Escolher…");
+    gtk_widget_add_css_class(browse, "secondary");
     g_signal_connect(browse, "clicked", G_CALLBACK(choose_file), app);
+
     gtk_widget_set_hexpand(GTK_WIDGET(app->convert_input), TRUE);
     gtk_box_append(GTK_BOX(input_box), GTK_WIDGET(app->convert_input));
     gtk_box_append(GTK_BOX(input_box), browse);
-    gtk_box_append(GTK_BOX(box), labeled_row("Arquivo", input_box));
+    gtk_box_append(GTK_BOX(card), make_field("Arquivo", input_box));
+
+    GtkWidget *grid = gtk_grid_new();
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 18);
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 12);
 
     app->convert_format = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
     const char *formats[] = {"mp4", "mkv", "webm", "mp3", "opus", "m4a", "flac", "wav"};
@@ -630,7 +836,6 @@ static GtkWidget *make_convert_page(DesktopApp *app)
         gtk_combo_box_text_append_text(app->convert_format, formats[i]);
     }
     gtk_combo_box_set_active(GTK_COMBO_BOX(app->convert_format), 0);
-    gtk_box_append(GTK_BOX(box), labeled_row("Formato", GTK_WIDGET(app->convert_format)));
 
     app->convert_acceleration = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
     const char *modes[] = {"auto", "software", "vulkan", "vaapi", "amf", "cuda", "qsv"};
@@ -638,78 +843,179 @@ static GtkWidget *make_convert_page(DesktopApp *app)
         gtk_combo_box_text_append_text(app->convert_acceleration, modes[i]);
     }
     gtk_combo_box_set_active(GTK_COMBO_BOX(app->convert_acceleration), 0);
-    gtk_box_append(GTK_BOX(box), labeled_row("Aceleração", GTK_WIDGET(app->convert_acceleration)));
 
-    GtkWidget *dest_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_grid_attach(
+        GTK_GRID(grid),
+        make_field("Formato", GTK_WIDGET(app->convert_format)),
+        0, 0, 1, 1);
+    gtk_grid_attach(
+        GTK_GRID(grid),
+        make_field("Aceleração", GTK_WIDGET(app->convert_acceleration)),
+        1, 0, 1, 1);
+    gtk_box_append(GTK_BOX(card), grid);
+
+    GtkWidget *destination_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     app->convert_destination = GTK_ENTRY(gtk_entry_new());
-    GtkWidget *dest_button = gtk_button_new_with_label("Escolher…");
-    g_object_set_data(G_OBJECT(dest_button), "target-entry", app->convert_destination);
-    g_signal_connect(dest_button, "clicked", G_CALLBACK(choose_folder_for_entry), app);
-    gtk_widget_set_hexpand(GTK_WIDGET(app->convert_destination), TRUE);
-    gtk_box_append(GTK_BOX(dest_box), GTK_WIDGET(app->convert_destination));
-    gtk_box_append(GTK_BOX(dest_box), dest_button);
-    gtk_box_append(GTK_BOX(box), labeled_row("Destino", dest_box));
+    gtk_entry_set_placeholder_text(
+        app->convert_destination,
+        "Padrão: pasta Downloads");
 
-    GtkWidget *convert = gtk_button_new_with_label("Adicionar conversão à fila");
-    gtk_widget_add_css_class(convert, "suggested-action");
+    GtkWidget *destination_button = gtk_button_new_with_label("Escolher…");
+    gtk_widget_add_css_class(destination_button, "secondary");
+    g_object_set_data(
+        G_OBJECT(destination_button),
+        "target-entry",
+        app->convert_destination);
+    g_signal_connect(
+        destination_button,
+        "clicked",
+        G_CALLBACK(choose_folder_for_entry),
+        app);
+
+    gtk_widget_set_hexpand(GTK_WIDGET(app->convert_destination), TRUE);
+    gtk_box_append(GTK_BOX(destination_box), GTK_WIDGET(app->convert_destination));
+    gtk_box_append(GTK_BOX(destination_box), destination_button);
+    gtk_box_append(GTK_BOX(card), make_field("Destino", destination_box));
+
+    GtkWidget *convert = gtk_button_new_with_label("Iniciar conversão");
+    gtk_widget_add_css_class(convert, "primary");
     g_signal_connect(convert, "clicked", G_CALLBACK(convert_clicked), app);
-    gtk_box_append(GTK_BOX(box), convert);
-    return box;
+    gtk_box_append(GTK_BOX(card), convert);
+
+    gtk_box_append(GTK_BOX(page), card);
+    return wrap_page(page);
 }
 
 static GtkWidget *make_queue_page(DesktopApp *app)
 {
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_widget_set_margin_top(box, 18);
-    gtk_widget_set_margin_bottom(box, 18);
-    gtk_widget_set_margin_start(box, 18);
-    gtk_widget_set_margin_end(box, 18);
-    GtkWidget *title = gtk_label_new("Fila / Histórico");
-    gtk_widget_add_css_class(title, "title-1");
-    gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
-    gtk_box_append(GTK_BOX(box), title);
+    GtkWidget *page = make_page(
+        "Cada faixa, no seu ritmo.",
+        "Acompanhe transferências, conversões e arquivos concluídos.");
+
     app->queue_list = GTK_LIST_BOX(gtk_list_box_new());
     gtk_list_box_set_selection_mode(app->queue_list, GTK_SELECTION_NONE);
+    gtk_widget_add_css_class(GTK_WIDGET(app->queue_list), "queue-list");
+
     GtkWidget *scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), GTK_WIDGET(app->queue_list));
+    gtk_scrolled_window_set_policy(
+        GTK_SCROLLED_WINDOW(scroll),
+        GTK_POLICY_NEVER,
+        GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(
+        GTK_SCROLLED_WINDOW(scroll),
+        GTK_WIDGET(app->queue_list));
     gtk_widget_set_vexpand(scroll, TRUE);
-    gtk_box_append(GTK_BOX(box), scroll);
-    return box;
+
+    gtk_box_append(GTK_BOX(page), scroll);
+    return page;
 }
 
 static GtkWidget *make_settings_page(DesktopApp *app)
 {
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_widget_set_margin_top(box, 18);
-    gtk_widget_set_margin_bottom(box, 18);
-    gtk_widget_set_margin_start(box, 18);
-    gtk_widget_set_margin_end(box, 18);
-    GtkWidget *title = gtk_label_new("Configurações");
-    gtk_widget_add_css_class(title, "title-1");
-    gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
-    gtk_box_append(GTK_BOX(box), title);
+    GtkWidget *page = make_page(
+        "Do seu jeito.",
+        "Escolha onde sua biblioteca será salva.");
 
-    GtkWidget *dest_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *directory_card = make_card();
+    append_section_title(directory_card, "01", "Pasta padrão");
+
+    GtkWidget *destination_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     app->settings_output = GTK_ENTRY(gtk_entry_new());
-    gtk_editable_set_text(GTK_EDITABLE(app->settings_output), app->engine.output_dir);
-    g_signal_connect(app->settings_output, "changed", G_CALLBACK(output_changed), app);
+    gtk_editable_set_text(
+        GTK_EDITABLE(app->settings_output),
+        app->engine.output_dir);
+    g_signal_connect(
+        app->settings_output,
+        "changed",
+        G_CALLBACK(output_changed),
+        app);
+
     GtkWidget *browse = gtk_button_new_with_label("Escolher…");
-    g_object_set_data(G_OBJECT(browse), "target-entry", app->settings_output);
-    g_signal_connect(browse, "clicked", G_CALLBACK(choose_folder_for_entry), app);
+    gtk_widget_add_css_class(browse, "secondary");
+    g_object_set_data(
+        G_OBJECT(browse),
+        "target-entry",
+        app->settings_output);
+    g_signal_connect(
+        browse,
+        "clicked",
+        G_CALLBACK(choose_folder_for_entry),
+        app);
+
     gtk_widget_set_hexpand(GTK_WIDGET(app->settings_output), TRUE);
-    gtk_box_append(GTK_BOX(dest_box), GTK_WIDGET(app->settings_output));
-    gtk_box_append(GTK_BOX(dest_box), browse);
-    gtk_box_append(GTK_BOX(box), labeled_row("Pasta padrão", dest_box));
+    gtk_box_append(GTK_BOX(destination_box), GTK_WIDGET(app->settings_output));
+    gtk_box_append(GTK_BOX(destination_box), browse);
+    gtk_box_append(
+        GTK_BOX(directory_card),
+        make_field("Diretório de saída", destination_box));
+    gtk_box_append(GTK_BOX(page), directory_card);
+
+    GtkWidget *youtube_card = make_card();
+    append_section_title(youtube_card, "YT", "Proteção do YouTube");
+
+    GtkWidget *protection_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    GtkWidget *protection_text = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+
+    GtkWidget *protection_title =
+        gtk_label_new("Ativar limite de segurança");
+    gtk_label_set_xalign(GTK_LABEL(protection_title), 0.0f);
+    gtk_widget_add_css_class(protection_title, "section-title");
+
+    GtkWidget *protection_hint = gtk_label_new(
+        "5 segundos entre downloads · até 300 vídeos em 90 minutos");
+    gtk_label_set_xalign(GTK_LABEL(protection_hint), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(protection_hint), TRUE);
+    gtk_widget_add_css_class(protection_hint, "muted");
+
+    gtk_box_append(GTK_BOX(protection_text), protection_title);
+    gtk_box_append(GTK_BOX(protection_text), protection_hint);
+    gtk_widget_set_hexpand(protection_text, TRUE);
 
     app->settings_youtube_protection = GTK_SWITCH(gtk_switch_new());
-    gtk_switch_set_active(app->settings_youtube_protection, app->engine.youtube_protection);
-    g_signal_connect(app->settings_youtube_protection, "notify::active", G_CALLBACK(protection_changed), app);
-    gtk_box_append(GTK_BOX(box), labeled_row("Proteção YouTube", GTK_WIDGET(app->settings_youtube_protection)));
+    gtk_switch_set_active(
+        app->settings_youtube_protection,
+        app->engine.youtube_protection);
+    g_signal_connect(
+        app->settings_youtube_protection,
+        "notify::active",
+        G_CALLBACK(protection_changed),
+        app);
+
+    gtk_box_append(GTK_BOX(protection_row), protection_text);
+    gtk_box_append(
+        GTK_BOX(protection_row),
+        GTK_WIDGET(app->settings_youtube_protection));
+    gtk_box_append(GTK_BOX(youtube_card), protection_row);
+
+    GtkWidget *retry_hint = gtk_label_new(
+        "A contagem continua após reiniciar. Falhas temporárias usam novas tentativas com espera progressiva.");
+    gtk_label_set_xalign(GTK_LABEL(retry_hint), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(retry_hint), TRUE);
+    gtk_widget_add_css_class(retry_hint, "muted");
+    gtk_box_append(GTK_BOX(youtube_card), retry_hint);
+    gtk_box_append(GTK_BOX(page), youtube_card);
+
+    GtkWidget *deps_card = make_card();
+    append_section_title(deps_card, "03", "Ferramentas externas");
+
+    GtkWidget *deps_hint = gtk_label_new(
+        "Verifique yt-dlp, FFmpeg e ffprobe usados pelo Downloader.");
+    gtk_label_set_xalign(GTK_LABEL(deps_hint), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(deps_hint), TRUE);
+    gtk_widget_add_css_class(deps_hint, "muted");
+    gtk_box_append(GTK_BOX(deps_card), deps_hint);
 
     GtkWidget *deps = gtk_button_new_with_label("Verificar dependências");
-    g_signal_connect(deps, "clicked", G_CALLBACK(dependencies_clicked), app);
-    gtk_box_append(GTK_BOX(box), deps);
-    return box;
+    gtk_widget_add_css_class(deps, "secondary");
+    g_signal_connect(
+        deps,
+        "clicked",
+        G_CALLBACK(dependencies_clicked),
+        app);
+    gtk_box_append(GTK_BOX(deps_card), deps);
+    gtk_box_append(GTK_BOX(page), deps_card);
+
+    return wrap_page(page);
 }
 
 static void load_history(DesktopApp *app)
@@ -718,49 +1024,146 @@ static void load_history(DesktopApp *app)
     size_t count = 0U;
     DldAppError error;
     dld_app_error_init(&error);
-    if (dld_database_list_tasks(&app->engine.database, &tasks, &count, &error)) {
+
+    if (dld_database_list_tasks(
+            &app->engine.database,
+            &tasks,
+            &count,
+            &error)) {
         for (size_t i = 0U; i < count; ++i) {
             add_queue_row(app, tasks[i].id, tasks[i].status);
         }
     }
+
     dld_database_free_task_list(tasks, count);
     dld_app_error_clear(&error);
+}
+
+static GtkWidget *make_sidebar(DesktopApp *app)
+{
+    GtkWidget *sidebar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(sidebar, "sidebar-shell");
+    gtk_widget_set_size_request(sidebar, 220, -1);
+
+    GtkWidget *brand = gtk_label_new("D / DOWNLOADER");
+    gtk_label_set_xalign(GTK_LABEL(brand), 0.0f);
+    gtk_widget_add_css_class(brand, "brand");
+    gtk_box_append(GTK_BOX(sidebar), brand);
+
+    GtkWidget *subtitle = gtk_label_new("Sua biblioteca de mídia");
+    gtk_label_set_xalign(GTK_LABEL(subtitle), 0.0f);
+    gtk_widget_add_css_class(subtitle, "brand-subtitle");
+    gtk_widget_set_margin_top(subtitle, 4);
+    gtk_widget_set_margin_bottom(subtitle, 28);
+    gtk_box_append(GTK_BOX(sidebar), subtitle);
+
+    GtkWidget *navigation = gtk_stack_sidebar_new();
+    gtk_stack_sidebar_set_stack(
+        GTK_STACK_SIDEBAR(navigation),
+        app->stack);
+    gtk_widget_set_vexpand(navigation, TRUE);
+    gtk_box_append(GTK_BOX(sidebar), navigation);
+
+    GtkWidget *separator = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_widget_set_margin_top(separator, 18);
+    gtk_widget_set_margin_bottom(separator, 12);
+    gtk_box_append(GTK_BOX(sidebar), separator);
+
+    GtkWidget *caption = gtk_label_new("SALVAR EM");
+    gtk_label_set_xalign(GTK_LABEL(caption), 0.0f);
+    gtk_widget_add_css_class(caption, "sidebar-caption");
+    gtk_box_append(GTK_BOX(sidebar), caption);
+
+    app->sidebar_output_label = GTK_LABEL(
+        gtk_label_new(app->engine.output_dir));
+    gtk_label_set_xalign(app->sidebar_output_label, 0.0f);
+    gtk_label_set_wrap(app->sidebar_output_label, TRUE);
+    gtk_widget_add_css_class(
+        GTK_WIDGET(app->sidebar_output_label),
+        "muted");
+    gtk_widget_set_margin_top(
+        GTK_WIDGET(app->sidebar_output_label),
+        6);
+    gtk_box_append(
+        GTK_BOX(sidebar),
+        GTK_WIDGET(app->sidebar_output_label));
+
+    return sidebar;
 }
 
 static void activate(GtkApplication *application, gpointer userdata)
 {
     DesktopApp *app = userdata;
     app->application = application;
-    app->window = GTK_WINDOW(gtk_application_window_new(application));
+
+    apply_theme();
+
+    app->window = GTK_WINDOW(
+        gtk_application_window_new(application));
     gtk_window_set_title(app->window, "Downloader");
-    gtk_window_set_default_size(app->window, 980, 680);
+    gtk_window_set_default_size(app->window, 1120, 760);
 
     GtkWidget *root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    GtkWidget *content = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    app->stack = GTK_STACK(gtk_stack_new());
-    gtk_stack_set_transition_type(app->stack, GTK_STACK_TRANSITION_TYPE_CROSSFADE);
-    GtkWidget *sidebar = gtk_stack_sidebar_new();
-    gtk_stack_sidebar_set_stack(GTK_STACK_SIDEBAR(sidebar), app->stack);
-    gtk_widget_set_size_request(sidebar, 190, -1);
+    gtk_widget_add_css_class(root, "app-root");
 
-    gtk_stack_add_titled(app->stack, make_download_page(app), "downloads", "Downloads");
-    gtk_stack_add_titled(app->stack, make_convert_page(app), "converter", "Conversor");
-    gtk_stack_add_titled(app->stack, make_queue_page(app), "queue", "Fila / Histórico");
-    gtk_stack_add_titled(app->stack, make_settings_page(app), "settings", "Configurações");
+    GtkWidget *content = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+
+    app->stack = GTK_STACK(gtk_stack_new());
+    gtk_stack_set_transition_type(
+        app->stack,
+        GTK_STACK_TRANSITION_TYPE_CROSSFADE);
+    gtk_stack_set_transition_duration(app->stack, 160);
+
+    gtk_stack_add_titled(
+        app->stack,
+        make_download_page(app),
+        "downloads",
+        "Downloads");
+    gtk_stack_add_titled(
+        app->stack,
+        make_convert_page(app),
+        "converter",
+        "Conversor");
+    gtk_stack_add_titled(
+        app->stack,
+        make_queue_page(app),
+        "queue",
+        "Fila e histórico");
+    gtk_stack_add_titled(
+        app->stack,
+        make_settings_page(app),
+        "settings",
+        "Configurações");
+
     gtk_widget_set_hexpand(GTK_WIDGET(app->stack), TRUE);
     gtk_widget_set_vexpand(GTK_WIDGET(app->stack), TRUE);
-    gtk_box_append(GTK_BOX(content), sidebar);
-    gtk_box_append(GTK_BOX(content), GTK_WIDGET(app->stack));
 
-    app->status_label = GTK_LABEL(gtk_label_new("Pronto."));
+    gtk_box_append(GTK_BOX(content), make_sidebar(app));
+    gtk_box_append(GTK_BOX(content), GTK_WIDGET(app->stack));
+    gtk_widget_set_vexpand(content, TRUE);
+
+    GtkWidget *status_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_add_css_class(status_bar, "status-bar");
+
+    GtkWidget *status_dot = gtk_label_new("●");
+    gtk_widget_add_css_class(status_dot, "status-dot");
+    gtk_box_append(GTK_BOX(status_bar), status_dot);
+
+    app->status_label = GTK_LABEL(gtk_label_new(
+        "Pronto. Escolha uma URL ou um arquivo para começar."));
     gtk_label_set_xalign(app->status_label, 0.0f);
-    gtk_widget_set_margin_start(GTK_WIDGET(app->status_label), 12);
-    gtk_widget_set_margin_end(GTK_WIDGET(app->status_label), 12);
-    gtk_widget_set_margin_top(GTK_WIDGET(app->status_label), 8);
-    gtk_widget_set_margin_bottom(GTK_WIDGET(app->status_label), 8);
+    gtk_label_set_wrap(app->status_label, TRUE);
+    gtk_widget_add_css_class(
+        GTK_WIDGET(app->status_label),
+        "muted");
+    gtk_box_append(
+        GTK_BOX(status_bar),
+        GTK_WIDGET(app->status_label));
+
     gtk_box_append(GTK_BOX(root), content);
-    gtk_box_append(GTK_BOX(root), GTK_WIDGET(app->status_label));
+    gtk_box_append(GTK_BOX(root), status_bar);
     gtk_window_set_child(app->window, root);
+
     load_history(app);
     gtk_window_present(app->window);
 }
