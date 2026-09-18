@@ -51,6 +51,28 @@ typedef struct {
     char speed[64];
 } DldProgress;
 
+typedef enum {
+    DLD_TRACK_LINE_NONE = 0,
+    DLD_TRACK_LINE_PROGRESS,
+    DLD_TRACK_LINE_FILE
+} DldTrackLineKind;
+
+/*
+ * Evento estruturado emitido pelo yt-dlp para uma faixa individual.
+ *
+ * Campos textuais usam buffers próprios para que o parser não devolva ponteiros
+ * para a linha temporária recebida do processo.
+ */
+typedef struct {
+    DldTrackLineKind kind;
+    char id[160];
+    char title[512];
+    char filepath[1024];
+    size_t playlist_index;
+    size_t playlist_count;
+    DldProgress progress;
+} DldTrackLine;
+
 void dld_command_init(DldCommand *command);
 void dld_command_clear(DldCommand *command);
 void dld_media_summary_init(DldMediaSummary *summary);
@@ -85,6 +107,7 @@ bool dld_parse_ytdlp_summary(const char *json_text, DldMediaSummary *summary,
 bool dld_parse_ffprobe_summary(const char *json_text, DldProbeSummary *summary,
                                DldAppError *error);
 DldProgress dld_parse_progress_line(const char *line);
+bool dld_parse_track_line(const char *line, DldTrackLine *track);
 
 /* Helpers de opções JSON usados por engine/desktop. */
 char *dld_json_get_string_copy(const char *json_text, const char *key,
