@@ -44,6 +44,16 @@ typedef struct {
 } UiUpdate;
 
 /*
+ * Widgets associados a uma tarefa ou faixa. A hash table possui apenas esta
+ * pequena struct; os widgets continuam pertencendo à árvore GTK.
+ */
+typedef struct {
+    GtkLabel *label;
+    GtkProgressBar *progress;
+    GtkWidget *cancel_button;
+} QueueRowUi;
+
+/*
  * Pedido de análise também possui suas próprias cópias, pois a caixa de texto
  * da interface pode mudar enquanto o worker ainda está consultando o yt-dlp.
  */
@@ -87,7 +97,7 @@ struct DesktopApp {
     GThreadPool *analysis_pool;
     atomic_bool shutting_down;
     GHashTable *cancel_flags; /* task id -> atomic_bool*; ownership do TaskJob. */
-    GHashTable *row_labels;   /* task id -> GtkLabel*; widgets pertencem ao GTK. */
+    GHashTable *queue_rows;   /* task/faixa id -> QueueRowUi*. */
     GMutex jobs_mutex;
 };
 
@@ -127,7 +137,12 @@ static const char *APP_CSS =
     ".status-bar { background-color: #0c121a; border-top: 1px solid #17202b; padding: 10px 24px; }\n"
     ".status-dot { color: #68dec3; font-size: 16px; }\n"
     ".queue-list, .queue-list row { background-color: transparent; }\n"
-    ".queue-row { background-color: #17202b; border: 1px solid #232f3d; border-radius: 12px; padding: 14px; margin: 5px 0; }\n";
+    ".queue-row { background-color: #17202b; border: 1px solid #232f3d; border-radius: 12px; padding: 14px; margin: 5px 0; }\n"
+    ".queue-title { color: #e8eff4; font-size: 14px; font-weight: bold; }\n"
+    ".track-progress { min-height: 8px; }\n"
+    ".track-progress trough { background-color: #212e3c; border-radius: 6px; min-height: 8px; }\n"
+    ".track-progress progress { background-color: #68dec3; border-radius: 6px; min-height: 8px; }\n"
+    ".track-progress text { color: #97a9b8; font-size: 11px; }\n";
 
 static void apply_theme(void)
 {
@@ -177,24 +192,182 @@ static const char *status_label(DldTaskStatus status)
     }
 }
 
+static gboolean status_is_terminal(DldTaskStatus status)
+{
+    return status == DLD_STATUS_COMPLETED ||
+           status == DLD_STATUS_FAILED ||
+           status == DLD_STATUS_CANCELLED;
+}
+
+static char *parent_task_id_copy(const char *task_id)
+{
+    if (task_id == NULL) return NULL;
+
+    const char *separator = strstr(task_id, "::");
+    const size_t length =
+        separator != NULL ? (size_t)(separator - task_id) : strlen(task_id);
+
+    char *parent = g_malloc(length + 1U);
+    memcpy(parent, task_id, length);
+    parent[length] = '\0';
+    return parent;
+}
+
+static QueueRowUi *ensure_queue_row(DesktopApp *app,
+                                    const char *task_id,
+                                    DldTaskStatus status)
+{
+    QueueRowUi *row = g_hash_table_lookup(app->queue_rows, task_id);
+    if (row != NULL) return row;
+
+    row = g_new0(QueueRowUi, 1);
+
+    GtkWidget *card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 9);
+    gtk_widget_add_css_class(card, "queue-row");
+
+    GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+
+    row->label = GTK_LABEL(gtk_label_new(NULL));
+    gtk_label_set_xalign(row->label, 0.0f);
+    gtk_label_set_wrap(row->label, TRUE);
+    gtk_widget_set_hexpand(GTK_WIDGET(row->label), TRUE);
+    gtk_widget_add_css_class(GTK_WIDGET(row->label), "queue-title");
+
+    row->cancel_button = gtk_button_new_with_label("Cancelar");
+    gtk_widget_add_css_class(row->cancel_button, "secondary");
+
+    /*
+     * Uma faixa usa "tarefa::id-da-faixa" para ter progresso próprio, mas o
+     * cancelamento sempre aponta para a tarefa pai que possui o processo yt-dlp.
+     */
+    char *parent_id = parent_task_id_copy(task_id);
+    g_object_set_data_full(
+        G_OBJECT(row->cancel_button),
+        "task-id",
+        parent_id,
+        g_free);
+    g_signal_connect(
+        row->cancel_button,
+        "clicked",
+        G_CALLBACK(cancel_clicked),
+        app);
+
+    gtk_box_append(GTK_BOX(header), GTK_WIDGET(row->label));
+    gtk_box_append(GTK_BOX(header), row->cancel_button);
+    gtk_box_append(GTK_BOX(card), header);
+
+    row->progress = GTK_PROGRESS_BAR(gtk_progress_bar_new());
+    gtk_progress_bar_set_show_text(row->progress, TRUE);
+    gtk_widget_add_css_class(GTK_WIDGET(row->progress), "track-progress");
+    gtk_widget_set_visible(
+        GTK_WIDGET(row->progress),
+        strstr(task_id, "::") != NULL);
+    gtk_box_append(GTK_BOX(card), GTK_WIDGET(row->progress));
+
+    gtk_list_box_append(app->queue_list, card);
+    g_hash_table_insert(app->queue_rows, g_strdup(task_id), row);
+
+    char initial[640];
+    (void)snprintf(
+        initial,
+        sizeof(initial),
+        "%s  —  %s",
+        task_id,
+        status_label(status));
+    gtk_label_set_text(row->label, initial);
+    return row;
+}
+
+static void update_queue_row(QueueRowUi *row,
+                             const UiUpdate *update)
+{
+    const bool child = strstr(update->task_id, "::") != NULL;
+    const char *name =
+        child && update->message != NULL && *update->message != '\0'
+            ? update->message
+            : update->task_id;
+
+    GString *title = g_string_new(name);
+    g_string_append_printf(
+        title,
+        "  —  %s",
+        status_label(update->status));
+
+    if (!child &&
+        update->message != NULL &&
+        *update->message != '\0' &&
+        strcmp(update->message, name) != 0) {
+        g_string_append_printf(title, "  ·  %s", update->message);
+    }
+
+    if (update->path != NULL && *update->path != '\0') {
+        g_string_append_printf(title, "\n%s", update->path);
+    }
+
+    gtk_label_set_text(row->label, title->str);
+    g_string_free(title, TRUE);
+
+    if (update->has_progress) {
+        double fraction = update->progress / 100.0;
+        if (fraction < 0.0) fraction = 0.0;
+        if (fraction > 1.0) fraction = 1.0;
+
+        gtk_progress_bar_set_fraction(row->progress, fraction);
+        gtk_widget_set_visible(GTK_WIDGET(row->progress), TRUE);
+
+        char progress_text[160];
+        if (update->speed != NULL && *update->speed != '\0') {
+            (void)snprintf(
+                progress_text,
+                sizeof(progress_text),
+                "%.0f%%  ·  %s",
+                update->progress,
+                update->speed);
+        } else {
+            (void)snprintf(
+                progress_text,
+                sizeof(progress_text),
+                "%.0f%%",
+                update->progress);
+        }
+        gtk_progress_bar_set_text(row->progress, progress_text);
+    } else if (child && update->status == DLD_STATUS_VALIDATING) {
+        gtk_widget_set_visible(GTK_WIDGET(row->progress), TRUE);
+        gtk_progress_bar_set_fraction(row->progress, 1.0);
+        gtk_progress_bar_set_text(row->progress, "Validando…");
+    }
+
+    const gboolean terminal = status_is_terminal(update->status);
+    gtk_widget_set_visible(row->cancel_button, !terminal);
+
+    if (update->status == DLD_STATUS_COMPLETED) {
+        gtk_widget_set_visible(GTK_WIDGET(row->progress), TRUE);
+        gtk_progress_bar_set_fraction(row->progress, 1.0);
+        gtk_progress_bar_set_text(row->progress, "100%");
+    }
+}
+
 /* Executado pelo main loop GTK, nunca pelo worker que produziu o evento. */
 static gboolean apply_ui_update(gpointer data)
 {
     UiUpdate *update = data;
-    GtkLabel *label = g_hash_table_lookup(update->app->row_labels, update->task_id);
-    if (label != NULL) {
-        GString *text = g_string_new(update->task_id);
-        g_string_append_printf(text, "  —  %s", status_label(update->status));
-        if (update->has_progress) g_string_append_printf(text, "  %.0f%%", update->progress);
-        if (update->speed != NULL && *update->speed != '\0') g_string_append_printf(text, "  %s", update->speed);
-        if (update->message != NULL && *update->message != '\0') {
-            g_string_append_printf(text, "  —  %s", update->message);
-        }
-        if (update->path != NULL && *update->path != '\0') g_string_append_printf(text, "  (%s)", update->path);
-        gtk_label_set_text(label, text->str);
-        g_string_free(text, TRUE);
+    QueueRowUi *row = ensure_queue_row(
+        update->app,
+        update->task_id,
+        update->status);
+    update_queue_row(row, update);
+
+    /*
+     * Progresso de faixa não deve fazer a barra de status inferior trocar de
+     * texto dezenas de vezes por segundo. Ela continua mostrando mensagens da
+     * tarefa pai ou estados finais relevantes.
+     */
+    const bool child = strstr(update->task_id, "::") != NULL;
+    if (update->message != NULL &&
+        (!child || status_is_terminal(update->status))) {
+        set_status(update->app, update->message);
     }
-    if (update->message != NULL) set_status(update->app, update->message);
+
     g_free(update->task_id);
     g_free(update->speed);
     g_free(update->message);
@@ -207,9 +380,12 @@ static gboolean apply_ui_update(gpointer data)
 static void engine_event(const DldEngineEvent *event, void *userdata)
 {
     DesktopApp *app = userdata;
+    if (atomic_load(&app->shutting_down)) return;
+
     UiUpdate *update = g_new0(UiUpdate, 1);
     update->app = app;
-    update->task_id = g_strdup(event->task_id != NULL ? event->task_id : "tarefa");
+    update->task_id =
+        g_strdup(event->task_id != NULL ? event->task_id : "tarefa");
     update->status = event->status;
     update->has_progress = event->has_progress;
     update->progress = event->progress_percent;
@@ -243,13 +419,19 @@ static void task_worker(gpointer data, gpointer user_data)
             .message = "Cancelado antes de iniciar",
         }, app);
     } else {
-        (void)dld_engine_execute_task(&app->engine, &job->task, job->cancelled,
-                                      engine_event, app, &error);
+        (void)dld_engine_execute_task(
+            &app->engine,
+            &job->task,
+            job->cancelled,
+            engine_event,
+            app,
+            &error);
     }
 
     g_mutex_lock(&app->jobs_mutex);
     g_hash_table_remove(app->cancel_flags, job->task.id);
     g_mutex_unlock(&app->jobs_mutex);
+
     dld_app_error_clear(&error);
     task_job_free(job);
 }
@@ -257,35 +439,28 @@ static void task_worker(gpointer data, gpointer user_data)
 static void cancel_clicked(GtkButton *button, gpointer userdata)
 {
     DesktopApp *app = userdata;
-    const char *task_id = g_object_get_data(G_OBJECT(button), "task-id");
+    const char *task_id =
+        g_object_get_data(G_OBJECT(button), "task-id");
     if (task_id == NULL) return;
+
     g_mutex_lock(&app->jobs_mutex);
-    atomic_bool *flag = g_hash_table_lookup(app->cancel_flags, task_id);
+    atomic_bool *flag =
+        g_hash_table_lookup(app->cancel_flags, task_id);
     if (flag != NULL) atomic_store(flag, true);
     g_mutex_unlock(&app->jobs_mutex);
-    set_status(app, flag != NULL ? "Cancelamento solicitado." : "A tarefa não está mais ativa.");
+
+    set_status(
+        app,
+        flag != NULL
+            ? "Cancelamento solicitado."
+            : "A tarefa não está mais ativa.");
 }
 
-static void add_queue_row(DesktopApp *app, const char *task_id, DldTaskStatus status)
+static void add_queue_row(DesktopApp *app,
+                          const char *task_id,
+                          DldTaskStatus status)
 {
-    GtkWidget *row_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-    gtk_widget_add_css_class(row_box, "queue-row");
-
-    GtkWidget *label = gtk_label_new(NULL);
-    gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
-    gtk_label_set_wrap(GTK_LABEL(label), TRUE);
-    gtk_widget_set_hexpand(label, TRUE);
-    char text[512];
-    (void)snprintf(text, sizeof(text), "%s  —  %s", task_id, status_label(status));
-    gtk_label_set_text(GTK_LABEL(label), text);
-    GtkWidget *cancel = gtk_button_new_with_label("Cancelar");
-    gtk_widget_add_css_class(cancel, "secondary");
-    g_object_set_data_full(G_OBJECT(cancel), "task-id", g_strdup(task_id), g_free);
-    g_signal_connect(cancel, "clicked", G_CALLBACK(cancel_clicked), app);
-    gtk_box_append(GTK_BOX(row_box), label);
-    gtk_box_append(GTK_BOX(row_box), cancel);
-    gtk_list_box_append(app->queue_list, row_box);
-    g_hash_table_replace(app->row_labels, g_strdup(task_id), label);
+    (void)ensure_queue_row(app, task_id, status);
 }
 
 static bool queue_task(DesktopApp *app, DldTaskRecord *task)
@@ -345,7 +520,8 @@ static void download_clicked(GtkButton *button, gpointer userdata)
         return;
     }
 
-    char *type = gtk_combo_box_text_get_active_text(app->download_type);
+    const char *type = gtk_combo_box_get_active_id(
+        GTK_COMBO_BOX(app->download_type));
     char *format = gtk_combo_box_text_get_active_text(app->download_format);
     char *quality = gtk_combo_box_text_get_active_text(app->download_quality);
     char *bitrate = gtk_combo_box_text_get_active_text(app->download_bitrate);
@@ -375,7 +551,6 @@ static void download_clicked(GtkButton *button, gpointer userdata)
     }
     dld_auth_ref_clear(&auth);
     json_object_put(options);
-    g_free(type);
     g_free(format);
     g_free(quality);
     g_free(bitrate);
@@ -663,11 +838,21 @@ static GtkWidget *make_download_page(DesktopApp *app)
     gtk_widget_set_hexpand(grid, TRUE);
 
     app->download_type = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
-    const char *types[] = {"Vídeo + áudio", "Somente vídeo", "Somente áudio"};
-    for (size_t i = 0; i < 3U; ++i) {
-        gtk_combo_box_text_append_text(app->download_type, types[i]);
-    }
-    gtk_combo_box_set_active(GTK_COMBO_BOX(app->download_type), 0);
+    gtk_combo_box_text_append(
+        app->download_type,
+        "video+audio",
+        "Vídeo + áudio");
+    gtk_combo_box_text_append(
+        app->download_type,
+        "video",
+        "Somente vídeo");
+    gtk_combo_box_text_append(
+        app->download_type,
+        "audio",
+        "Somente áudio");
+    gtk_combo_box_set_active_id(
+        GTK_COMBO_BOX(app->download_type),
+        "video+audio");
 
     app->download_format = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
     const char *formats[] = {"auto", "mp4", "mkv", "webm", "mp3", "opus", "m4a", "flac", "wav"};
@@ -1184,7 +1369,11 @@ int main(int argc, char **argv)
     dld_app_error_clear(&error);
     g_mutex_init(&app.jobs_mutex);
     app.cancel_flags = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-    app.row_labels = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    app.queue_rows = g_hash_table_new_full(
+        g_str_hash,
+        g_str_equal,
+        g_free,
+        g_free);
     atomic_init(&app.shutting_down, false);
     app.download_pool = g_thread_pool_new(task_worker, &app, 2, FALSE, NULL);
     app.conversion_pool = g_thread_pool_new(task_worker, &app, 1, FALSE, NULL);
@@ -1210,7 +1399,7 @@ int main(int argc, char **argv)
     g_thread_pool_free(app.conversion_pool, FALSE, TRUE);
     g_thread_pool_free(app.analysis_pool, FALSE, TRUE);
     g_hash_table_destroy(app.cancel_flags);
-    g_hash_table_destroy(app.row_labels);
+    g_hash_table_destroy(app.queue_rows);
     g_mutex_clear(&app.jobs_mutex);
     dld_engine_clear(&app.engine);
     g_object_unref(application);
