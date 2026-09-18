@@ -17,14 +17,11 @@ jobs:
       - name: Baixar código
         uses: actions/checkout@v4
 
-      - name: Instalar Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Instalar bibliotecas de build e FFmpeg
+      - name: Instalar dependências
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl file ffmpeg libegl1-mesa-dev libgl1-mesa-dev \
-            libwayland-dev libx11-dev libxkbcommon-dev
+          sudo apt-get install -y build-essential cmake pkg-config curl file ffmpeg \
+            libgtk-4-dev libjson-c-dev libsqlite3-dev
 
       - name: Baixar ferramentas AppImage
         run: |
@@ -54,7 +51,7 @@ jobs:
           APPIMAGE_OUTPUT_DIR: ${{ github.workspace }}/dist
         run: ./packaging/build-appimage.sh
 
-      - name: Publicar artefato da execução
+      - name: Publicar artefato
         uses: actions/upload-artifact@v4
         with:
           name: Downloader-AppImage

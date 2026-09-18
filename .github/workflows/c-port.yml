@@ -1,0 +1,38 @@
+name: C17
+
+on:
+  push:
+    branches: [master, c-port]
+    paths:
+      - "c/**"
+      - ".github/workflows/c-port.yml"
+  pull_request:
+    paths:
+      - "c/**"
+      - ".github/workflows/c-port.yml"
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@v4
+
+      - name: Instalar dependências
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config \
+            libgtk-4-dev libjson-c-dev libsqlite3-dev ffmpeg
+
+      - name: Configurar
+        run: cmake -S c -B build/c -DCMAKE_BUILD_TYPE=Debug -DDOWNLOADER_BUILD_DESKTOP=ON
+
+      - name: Compilar
+        run: cmake --build build/c --parallel 2
+
+      - name: Testar
+        run: ctest --test-dir build/c --output-on-failure
+
+      - name: Exercitar CLI
+        run: ./build/c/downloader-cli --help
