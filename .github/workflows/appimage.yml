@@ -64,3 +64,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/Downloader-x86_64.AppImage dist/Downloader-x86_64.AppImage.sha256 --generate-notes
+
+      - name: Publicar v0.2.0 da migração C17
+        if: github.ref == 'refs/heads/master' && contains(github.event.head_commit.message, '[release-v0.2.0]')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git tag v0.2.0 "$GITHUB_SHA"
+          git push origin v0.2.0
+          gh release create v0.2.0 \
+            dist/Downloader-x86_64.AppImage \
+            dist/Downloader-x86_64.AppImage.sha256 \
+            --target "$GITHUB_SHA" \
+            --title "v0.2.0 — C17 + GTK4" \
+            --generate-notes
