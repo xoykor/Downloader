@@ -1,3 +1,11 @@
+/*
+ * Índice local usado para reconhecer downloads já concluídos.
+ *
+ * O arquivo de índice é apenas uma dica de identidade. Antes de devolver um
+ * caminho, o código reconstrói o caminho dentro da pasta de destino e confirma
+ * que o arquivo ainda existe, evitando confiar cegamente em JSON antigo.
+ */
+
 #include "downloader/library.h"
 
 #include <errno.h>

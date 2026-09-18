@@ -1,3 +1,11 @@
+/*
+ * Descoberta e sondagem de aceleração por hardware.
+ *
+ * O fato de um backend aparecer em `ffmpeg -hwaccels` não prova que existe um
+ * dispositivo utilizável. A seleção automática só aceita backends que passam
+ * pela sondagem real; caso contrário a engine permanece em software.
+ */
+
 #include "downloader/hardware.h"
 #include "downloader/process.h"
 
