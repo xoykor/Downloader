@@ -1,3 +1,11 @@
+/*
+ * Interface GTK4.
+ *
+ * GTK só é manipulado na thread principal. Workers recebem cópias próprias das
+ * tarefas, executam a engine em `GThreadPool` e devolvem dados por `g_idle_add`,
+ * que agenda a atualização visual de volta na thread do loop principal.
+ */
+
 #include "downloader/engine.h"
 
 #include <gtk/gtk.h>
@@ -10,12 +18,20 @@
 
 typedef struct DesktopApp DesktopApp;
 
+/*
+ * Trabalho entregue a um pool. `task` é cópia profunda; `cancelled` vive tanto
+ * quanto o job e também é referenciado pela tabela de cancelamento da UI.
+ */
 typedef struct {
     DesktopApp *app;
     DldTaskRecord task;
     atomic_bool *cancelled;
 } TaskJob;
 
+/*
+ * Mensagem atravessando worker -> thread GTK. Todas as strings são cópias GLib
+ * porque o evento original da engine só é válido durante o callback.
+ */
 typedef struct {
     DesktopApp *app;
     char *task_id;
@@ -27,6 +43,10 @@ typedef struct {
     char *path;
 } UiUpdate;
 
+/*
+ * Pedido de análise também possui suas próprias cópias, pois a caixa de texto
+ * da interface pode mudar enquanto o worker ainda está consultando o yt-dlp.
+ */
 typedef struct {
     DesktopApp *app;
     char *url;
@@ -103,6 +123,7 @@ static const char *status_label(DldTaskStatus status)
     }
 }
 
+/* Executado pelo main loop GTK, nunca pelo worker que produziu o evento. */
 static gboolean apply_ui_update(gpointer data)
 {
     UiUpdate *update = data;
@@ -112,7 +133,9 @@ static gboolean apply_ui_update(gpointer data)
         g_string_append_printf(text, "  —  %s", status_label(update->status));
         if (update->has_progress) g_string_append_printf(text, "  %.0f%%", update->progress);
         if (update->speed != NULL && *update->speed != '\0') g_string_append_printf(text, "  %s", update->speed);
-        if (update->message != NULL && *update->message != '\0') g_string_append_printf(text, "  —  %s", update->message);
+        if (update->message != NULL && *update->message != '\0') {
+            g_string_append_printf(text, "  —  %s", update->message);
+        }
         if (update->path != NULL && *update->path != '\0') g_string_append_printf(text, "  (%s)", update->path);
         gtk_label_set_text(label, text->str);
         g_string_free(text, TRUE);
@@ -126,6 +149,7 @@ static gboolean apply_ui_update(gpointer data)
     return G_SOURCE_REMOVE;
 }
 
+/* Copia o evento emprestado antes de entregá-lo de forma assíncrona ao GTK. */
 static void engine_event(const DldEngineEvent *event, void *userdata)
 {
     DesktopApp *app = userdata;
@@ -149,6 +173,7 @@ static void task_job_free(TaskJob *job)
     g_free(job);
 }
 
+/* Worker não toca em widgets; ele só executa a engine e emite eventos copiados. */
 static void task_worker(gpointer data, gpointer user_data)
 {
     TaskJob *job = data;
@@ -226,6 +251,10 @@ static bool queue_task(DesktopApp *app, DldTaskRecord *task)
     (void)dld_database_put_task(&app->engine.database, &job->task, &error);
     dld_app_error_clear(&error);
 
+    /*
+     * A hash table apenas referencia a flag; `TaskJob` continua sendo o dono e a
+     * remove da tabela antes de liberar a memória no fim do worker.
+     */
     g_mutex_lock(&app->jobs_mutex);
     g_hash_table_replace(app->cancel_flags, g_strdup(job->task.id), job->cancelled);
     g_mutex_unlock(&app->jobs_mutex);
@@ -288,7 +317,10 @@ static void download_clicked(GtkButton *button, gpointer userdata)
     }
     dld_auth_ref_clear(&auth);
     json_object_put(options);
-    g_free(type); g_free(format); g_free(quality); g_free(bitrate);
+    g_free(type);
+    g_free(format);
+    g_free(quality);
+    g_free(bitrate);
 
     if (!queue_task(app, &task)) set_status(app, "Não foi possível adicionar a tarefa.");
     else set_status(app, "Download adicionado à fila.");
@@ -349,7 +381,8 @@ static void analyze_clicked(GtkButton *button, gpointer userdata)
     job->playlist = gtk_check_button_get_active(app->download_playlist);
     dld_auth_ref_init(&job->auth);
     if (!auth_from_widgets(app, &job->auth, &job->has_auth)) {
-        g_free(job->url); g_free(job);
+        g_free(job->url);
+        g_free(job);
         set_status(app, "Falha ao preparar autenticação.");
         return;
     }
@@ -382,7 +415,8 @@ static void convert_clicked(GtkButton *button, gpointer userdata)
     if (destination != NULL && *destination != '\0') task.destination = dld_string_duplicate(destination);
     task.collision = DLD_COLLISION_RENAME;
     json_object_put(options);
-    g_free(format); g_free(acceleration);
+    g_free(format);
+    g_free(acceleration);
     if (!queue_task(app, &task)) set_status(app, "Não foi possível adicionar a conversão.");
     else set_status(app, "Conversão adicionada à fila.");
     dld_task_record_clear(&task);
@@ -443,7 +477,10 @@ static void protection_changed(GtkSwitch *widget, GParamSpec *pspec, gpointer us
     (void)pspec;
     DesktopApp *app = userdata;
     app->engine.youtube_protection = gtk_switch_get_active(widget);
-    set_status(app, app->engine.youtube_protection ? "Proteção do YouTube ativada." : "Proteção do YouTube desativada.");
+    const char *message = app->engine.youtube_protection
+                              ? "Proteção do YouTube ativada."
+                              : "Proteção do YouTube desativada.";
+    set_status(app, message);
 }
 
 static void output_changed(GtkEditable *editable, gpointer userdata)
@@ -485,8 +522,10 @@ static GtkWidget *labeled_row(const char *label_text, GtkWidget *control)
 static GtkWidget *make_download_page(DesktopApp *app)
 {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_widget_set_margin_top(box, 18); gtk_widget_set_margin_bottom(box, 18);
-    gtk_widget_set_margin_start(box, 18); gtk_widget_set_margin_end(box, 18);
+    gtk_widget_set_margin_top(box, 18);
+    gtk_widget_set_margin_bottom(box, 18);
+    gtk_widget_set_margin_start(box, 18);
+    gtk_widget_set_margin_end(box, 18);
     GtkWidget *title = gtk_label_new("Downloads");
     gtk_widget_add_css_class(title, "title-1");
     gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
@@ -498,25 +537,33 @@ static GtkWidget *make_download_page(DesktopApp *app)
 
     app->download_type = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
     const char *types[] = {"video+audio", "video", "audio"};
-    for (size_t i = 0; i < 3U; ++i) gtk_combo_box_text_append_text(app->download_type, types[i]);
+    for (size_t i = 0; i < 3U; ++i) {
+        gtk_combo_box_text_append_text(app->download_type, types[i]);
+    }
     gtk_combo_box_set_active(GTK_COMBO_BOX(app->download_type), 0);
     gtk_box_append(GTK_BOX(box), labeled_row("Tipo", GTK_WIDGET(app->download_type)));
 
     app->download_format = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
     const char *formats[] = {"auto", "mp4", "mkv", "webm", "mp3", "opus", "m4a", "flac", "wav"};
-    for (size_t i = 0; i < sizeof(formats)/sizeof(formats[0]); ++i) gtk_combo_box_text_append_text(app->download_format, formats[i]);
+    for (size_t i = 0; i < sizeof(formats) / sizeof(formats[0]); ++i) {
+        gtk_combo_box_text_append_text(app->download_format, formats[i]);
+    }
     gtk_combo_box_set_active(GTK_COMBO_BOX(app->download_format), 0);
     gtk_box_append(GTK_BOX(box), labeled_row("Formato", GTK_WIDGET(app->download_format)));
 
     app->download_quality = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
     const char *qualities[] = {"Sem limite", "480", "720", "1080", "1440", "2160"};
-    for (size_t i = 0; i < 6U; ++i) gtk_combo_box_text_append_text(app->download_quality, qualities[i]);
+    for (size_t i = 0; i < 6U; ++i) {
+        gtk_combo_box_text_append_text(app->download_quality, qualities[i]);
+    }
     gtk_combo_box_set_active(GTK_COMBO_BOX(app->download_quality), 0);
     gtk_box_append(GTK_BOX(box), labeled_row("Altura máxima", GTK_WIDGET(app->download_quality)));
 
     app->download_bitrate = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
     const char *bitrates[] = {"auto", "128K", "192K", "256K", "320K"};
-    for (size_t i = 0; i < 5U; ++i) gtk_combo_box_text_append_text(app->download_bitrate, bitrates[i]);
+    for (size_t i = 0; i < 5U; ++i) {
+        gtk_combo_box_text_append_text(app->download_bitrate, bitrates[i]);
+    }
     gtk_combo_box_set_active(GTK_COMBO_BOX(app->download_bitrate), 0);
     gtk_box_append(GTK_BOX(box), labeled_row("Bitrate", GTK_WIDGET(app->download_bitrate)));
 
@@ -559,10 +606,13 @@ static GtkWidget *make_download_page(DesktopApp *app)
 static GtkWidget *make_convert_page(DesktopApp *app)
 {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_widget_set_margin_top(box, 18); gtk_widget_set_margin_bottom(box, 18);
-    gtk_widget_set_margin_start(box, 18); gtk_widget_set_margin_end(box, 18);
+    gtk_widget_set_margin_top(box, 18);
+    gtk_widget_set_margin_bottom(box, 18);
+    gtk_widget_set_margin_start(box, 18);
+    gtk_widget_set_margin_end(box, 18);
     GtkWidget *title = gtk_label_new("Conversor");
-    gtk_widget_add_css_class(title, "title-1"); gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
+    gtk_widget_add_css_class(title, "title-1");
+    gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
     gtk_box_append(GTK_BOX(box), title);
 
     GtkWidget *input_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
@@ -576,13 +626,17 @@ static GtkWidget *make_convert_page(DesktopApp *app)
 
     app->convert_format = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
     const char *formats[] = {"mp4", "mkv", "webm", "mp3", "opus", "m4a", "flac", "wav"};
-    for (size_t i = 0; i < sizeof(formats)/sizeof(formats[0]); ++i) gtk_combo_box_text_append_text(app->convert_format, formats[i]);
+    for (size_t i = 0; i < sizeof(formats) / sizeof(formats[0]); ++i) {
+        gtk_combo_box_text_append_text(app->convert_format, formats[i]);
+    }
     gtk_combo_box_set_active(GTK_COMBO_BOX(app->convert_format), 0);
     gtk_box_append(GTK_BOX(box), labeled_row("Formato", GTK_WIDGET(app->convert_format)));
 
     app->convert_acceleration = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
     const char *modes[] = {"auto", "software", "vulkan", "vaapi", "amf", "cuda", "qsv"};
-    for (size_t i = 0; i < 7U; ++i) gtk_combo_box_text_append_text(app->convert_acceleration, modes[i]);
+    for (size_t i = 0; i < 7U; ++i) {
+        gtk_combo_box_text_append_text(app->convert_acceleration, modes[i]);
+    }
     gtk_combo_box_set_active(GTK_COMBO_BOX(app->convert_acceleration), 0);
     gtk_box_append(GTK_BOX(box), labeled_row("Aceleração", GTK_WIDGET(app->convert_acceleration)));
 
@@ -606,10 +660,13 @@ static GtkWidget *make_convert_page(DesktopApp *app)
 static GtkWidget *make_queue_page(DesktopApp *app)
 {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_widget_set_margin_top(box, 18); gtk_widget_set_margin_bottom(box, 18);
-    gtk_widget_set_margin_start(box, 18); gtk_widget_set_margin_end(box, 18);
+    gtk_widget_set_margin_top(box, 18);
+    gtk_widget_set_margin_bottom(box, 18);
+    gtk_widget_set_margin_start(box, 18);
+    gtk_widget_set_margin_end(box, 18);
     GtkWidget *title = gtk_label_new("Fila / Histórico");
-    gtk_widget_add_css_class(title, "title-1"); gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
+    gtk_widget_add_css_class(title, "title-1");
+    gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
     gtk_box_append(GTK_BOX(box), title);
     app->queue_list = GTK_LIST_BOX(gtk_list_box_new());
     gtk_list_box_set_selection_mode(app->queue_list, GTK_SELECTION_NONE);
@@ -623,10 +680,13 @@ static GtkWidget *make_queue_page(DesktopApp *app)
 static GtkWidget *make_settings_page(DesktopApp *app)
 {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_widget_set_margin_top(box, 18); gtk_widget_set_margin_bottom(box, 18);
-    gtk_widget_set_margin_start(box, 18); gtk_widget_set_margin_end(box, 18);
+    gtk_widget_set_margin_top(box, 18);
+    gtk_widget_set_margin_bottom(box, 18);
+    gtk_widget_set_margin_start(box, 18);
+    gtk_widget_set_margin_end(box, 18);
     GtkWidget *title = gtk_label_new("Configurações");
-    gtk_widget_add_css_class(title, "title-1"); gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
+    gtk_widget_add_css_class(title, "title-1");
+    gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
     gtk_box_append(GTK_BOX(box), title);
 
     GtkWidget *dest_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
@@ -659,7 +719,9 @@ static void load_history(DesktopApp *app)
     DldAppError error;
     dld_app_error_init(&error);
     if (dld_database_list_tasks(&app->engine.database, &tasks, &count, &error)) {
-        for (size_t i = 0U; i < count; ++i) add_queue_row(app, tasks[i].id, tasks[i].status);
+        for (size_t i = 0U; i < count; ++i) {
+            add_queue_row(app, tasks[i].id, tasks[i].status);
+        }
     }
     dld_database_free_task_list(tasks, count);
     dld_app_error_clear(&error);

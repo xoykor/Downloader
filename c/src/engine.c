@@ -1,3 +1,11 @@
+/*
+ * Orquestração de alto nível do Downloader.
+ *
+ * Regra de segurança mais importante: download/conversão nunca escreve o arquivo
+ * final diretamente. O trabalho acontece em uma área temporária, passa por
+ * ffprobe e somente então é publicado segundo a política de colisão escolhida.
+ */
+
 #include "downloader/engine.h"
 
 #include "downloader/hardware.h"
@@ -192,7 +200,10 @@ bool dld_engine_check_dependencies(DldEngine *engine, char **report, DldAppError
         }
         *report = text;
     }
-    for (size_t i = 0U; i < 3U; ++i) { free(paths[i]); free(versions[i]); }
+    for (size_t i = 0U; i < 3U; ++i) {
+        free(paths[i]);
+        free(versions[i]);
+    }
     if (!ok) {
         (void)dld_app_error_set(error, DLD_ERROR_DEPENDENCY,
                                 "yt-dlp, ffmpeg e ffprobe precisam estar disponíveis no PATH.",
@@ -360,6 +371,10 @@ static bool set_task_destination(DldTaskRecord *task, const char *path)
     return true;
 }
 
+/*
+ * Pipeline de download: analisar -> deduplicar -> limitar -> baixar em temporário
+ * -> validar cada mídia -> publicar -> registrar no índice local.
+ */
 static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool *cancel_flag,
                              DldEngineEventCallback callback, void *userdata, DldAppError *error)
 {
@@ -402,7 +417,9 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
                 dld_probe_summary_clear(&probe);
                 free(existing);
                 dld_media_summary_clear(&summary);
-                free(format); free(kind); free(bitrate);
+                free(format);
+                free(kind);
+                free(bitrate);
                 return true;
             }
             dld_probe_summary_clear(&probe);
@@ -481,7 +498,10 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
     while ((entry = readdir(directory)) != NULL) {
         if (entry->d_name[0] == '.' || is_auxiliary_download_file(entry->d_name)) continue;
         char *source = path_join(tmp_dir, entry->d_name);
-        if (source == NULL || !regular_file(source)) { free(source); continue; }
+        if (source == NULL || !regular_file(source)) {
+            free(source);
+            continue;
+        }
         DldProbeSummary probe;
         dld_probe_summary_init(&probe);
         if (!probe_file(engine, source, &probe, error)) {
@@ -495,15 +515,20 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
         }
         dld_probe_summary_clear(&probe);
         char *destination = path_join(destination_dir, entry->d_name);
-        if (destination == NULL) { free(source); continue; }
+        if (destination == NULL) {
+            free(source);
+            continue;
+        }
         DldPublishedOutput output;
         dld_published_output_init(&output);
         if (!dld_publish_output(source, destination, task->collision, &output, error)) {
             dld_published_output_clear(&output);
-            free(destination); free(source);
+            free(destination);
+            free(source);
             closedir(directory);
             dld_media_summary_clear(&summary);
-            free(tmp_dir); free(last_path);
+            free(tmp_dir);
+            free(last_path);
             goto fail;
         }
         char *media_id = extract_id_from_filename(entry->d_name);
@@ -517,7 +542,8 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
         ++published;
         emit(callback, userdata, task, true, 100.0, NULL, "Arquivo validado e publicado", output.path);
         dld_published_output_clear(&output);
-        free(destination); free(source);
+        free(destination);
+        free(source);
     }
     closedir(directory);
     (void)rmdir(tmp_dir);
@@ -531,13 +557,17 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
     }
     if (!playlist && last_path != NULL) (void)set_task_destination(task, last_path);
     free(last_path);
-    free(format); free(kind); free(bitrate);
+    free(format);
+    free(kind);
+    free(bitrate);
     return true;
 
 oom:
     (void)dld_app_error_set(error, DLD_ERROR_INTERNAL, "Memória insuficiente.", "download", false, 0);
 fail:
-    free(format); free(kind); free(bitrate);
+    free(format);
+    free(kind);
+    free(bitrate);
     return false;
 }
 
@@ -553,6 +583,11 @@ static DldAccelerationMode parse_acceleration(const char *text)
     return DLD_ACCELERATION_SOFTWARE;
 }
 
+/*
+ * Conversão também usa temporário. A aceleração é uma otimização opcional: se o
+ * backend validado falhar para o codec concreto, o mesmo trabalho é repetido em
+ * software antes de declarar falha ao usuário.
+ */
 static bool execute_convert(DldEngine *engine, DldTaskRecord *task, atomic_bool *cancel_flag,
                             DldEngineEventCallback callback, void *userdata, DldAppError *error)
 {
@@ -564,13 +599,22 @@ static bool execute_convert(DldEngine *engine, DldTaskRecord *task, atomic_bool 
     char *format = dld_json_get_string_copy(task->options_json, "formato", NULL);
     if (format == NULL) format = dld_json_get_string_copy(task->options_json, "format", "mp4");
     char *acceleration_text = dld_json_get_string_copy(task->options_json, "aceleracao", NULL);
-    if (acceleration_text == NULL) acceleration_text = dld_json_get_string_copy(task->options_json, "acceleration", "auto");
-    if (format == NULL || acceleration_text == NULL) { free(format); free(acceleration_text); return false; }
+    if (acceleration_text == NULL) {
+        acceleration_text = dld_json_get_string_copy(task->options_json, "acceleration", "auto");
+    }
+    if (format == NULL || acceleration_text == NULL) {
+        free(format);
+        free(acceleration_text);
+        return false;
+    }
 
     DldProbeSummary input_probe;
     dld_probe_summary_init(&input_probe);
     if (!probe_file(engine, task->input_path, &input_probe, error)) {
-        dld_probe_summary_clear(&input_probe); free(format); free(acceleration_text); return false;
+        dld_probe_summary_clear(&input_probe);
+        free(format);
+        free(acceleration_text);
+        return false;
     }
     dld_probe_summary_clear(&input_probe);
 
@@ -589,12 +633,25 @@ static bool execute_convert(DldEngine *engine, DldTaskRecord *task, atomic_bool 
     }
 
     const char *destination_dir = task->destination != NULL ? task->destination : engine->output_dir;
-    if (!ensure_directory(destination_dir, error)) { free(format); free(acceleration_text); return false; }
+    if (!ensure_directory(destination_dir, error)) {
+        free(format);
+        free(acceleration_text);
+        return false;
+    }
     char *stem = stem_copy(task->input_path);
-    if (stem == NULL) { free(format); free(acceleration_text); return false; }
+    if (stem == NULL) {
+        free(format);
+        free(acceleration_text);
+        return false;
+    }
     const size_t name_len = strlen(stem) + strlen(format) + 2U;
     char *name = malloc(name_len);
-    if (name == NULL) { free(stem); free(format); free(acceleration_text); return false; }
+    if (name == NULL) {
+        free(stem);
+        free(format);
+        free(acceleration_text);
+        return false;
+    }
     (void)snprintf(name, name_len, "%s.%s", stem, format);
     free(stem);
     char *destination = path_join(destination_dir, name);
@@ -602,16 +659,31 @@ static bool execute_convert(DldEngine *engine, DldTaskRecord *task, atomic_bool 
 
     char *tmp_root = path_join(engine->data_dir, "tmp");
     if (tmp_root == NULL || !ensure_directory(tmp_root, error)) {
-        free(tmp_root); free(destination); free(format); free(acceleration_text); return false;
+        free(tmp_root);
+        free(destination);
+        free(format);
+        free(acceleration_text);
+        return false;
     }
     const size_t tmp_name_len = strlen(task->id) + strlen(format) + 16U;
     char *tmp_name = malloc(tmp_name_len);
-    if (tmp_name == NULL) { free(tmp_root); free(destination); free(format); free(acceleration_text); return false; }
+    if (tmp_name == NULL) {
+        free(tmp_root);
+        free(destination);
+        free(format);
+        free(acceleration_text);
+        return false;
+    }
     (void)snprintf(tmp_name, tmp_name_len, "%s.part.%s", task->id, format);
     char *temporary = path_join(tmp_root, tmp_name);
-    free(tmp_root); free(tmp_name);
+    free(tmp_root);
+    free(tmp_name);
     if (temporary == NULL || destination == NULL) {
-        free(temporary); free(destination); free(format); free(acceleration_text); return false;
+        free(temporary);
+        free(destination);
+        free(format);
+        free(acceleration_text);
+        return false;
     }
 
     DldCommand command;
@@ -659,7 +731,10 @@ static bool execute_convert(DldEngine *engine, DldTaskRecord *task, atomic_bool 
     dld_process_result_clear(&result);
     if (!ok) {
         (void)dld_cleanup_temporary(temporary, NULL);
-        free(temporary); free(destination); free(format); free(acceleration_text);
+        free(temporary);
+        free(destination);
+        free(format);
+        free(acceleration_text);
         return false;
     }
 
@@ -668,7 +743,10 @@ static bool execute_convert(DldEngine *engine, DldTaskRecord *task, atomic_bool 
     if (!probe_file(engine, temporary, &output_probe, error)) {
         dld_probe_summary_clear(&output_probe);
         (void)dld_cleanup_temporary(temporary, NULL);
-        free(temporary); free(destination); free(format); free(acceleration_text);
+        free(temporary);
+        free(destination);
+        free(format);
+        free(acceleration_text);
         return false;
     }
     dld_probe_summary_clear(&output_probe);
@@ -681,7 +759,10 @@ static bool execute_convert(DldEngine *engine, DldTaskRecord *task, atomic_bool 
         emit(callback, userdata, task, true, 100.0, NULL, "Conversão concluída", published.path);
     }
     dld_published_output_clear(&published);
-    free(temporary); free(destination); free(format); free(acceleration_text);
+    free(temporary);
+    free(destination);
+    free(format);
+    free(acceleration_text);
     return ok;
 }
 
@@ -698,6 +779,11 @@ static bool execute_validate(DldEngine *engine, DldTaskRecord *task,
     return ok;
 }
 
+/*
+ * Ponto único para executar uma tarefa persistente. Toda saída passa por aqui,
+ * então estados inicial/final e erro são gravados no banco de maneira uniforme
+ * para CLI e GTK4.
+ */
 bool dld_engine_execute_task(DldEngine *engine, DldTaskRecord *task,
                              atomic_bool *cancel_flag,
                              DldEngineEventCallback callback, void *userdata,
@@ -711,6 +797,7 @@ bool dld_engine_execute_task(DldEngine *engine, DldTaskRecord *task,
                    task->kind == DLD_TASK_MERGE ? DLD_STATUS_MERGING : DLD_STATUS_VALIDATING;
     task->has_error = false;
     dld_app_error_clear(&task->error);
+    /* Persistência é best-effort aqui: falhar ao salvar histórico não impede a mídia de executar. */
     (void)dld_database_put_task(&engine->database, task, error);
     dld_app_error_clear(error);
     emit(callback, userdata, task, false, 0.0, NULL, "Tarefa iniciada", NULL);

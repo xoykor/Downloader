@@ -1,6 +1,13 @@
 #ifndef DOWNLOADER_PUBLISH_H
 #define DOWNLOADER_PUBLISH_H
 
+/*
+ * Publicação segura de arquivos temporários.
+ *
+ * A publicação é o único ponto que torna um resultado visível no destino final.
+ * `DldPublishedOutput.path` pertence à struct e é liberado por `*_clear`.
+ */
+
 #include "downloader/domain.h"
 
 #include <stdbool.h>

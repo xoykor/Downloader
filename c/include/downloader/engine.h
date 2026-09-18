@@ -1,6 +1,14 @@
 #ifndef DOWNLOADER_ENGINE_H
 #define DOWNLOADER_ENGINE_H
 
+/*
+ * Orquestrador de alto nível.
+ *
+ * `DldEngineConfig` apenas empresta suas strings durante `dld_engine_open`.
+ * `DldEngine` cria cópias próprias delas. Eventos passados ao callback também
+ * são emprestados e só permanecem válidos durante a chamada do callback.
+ */
+
 #include "downloader/database.h"
 #include "downloader/domain.h"
 #include "downloader/media.h"

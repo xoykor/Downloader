@@ -1,3 +1,11 @@
+/*
+ * Persistência SQLite.
+ *
+ * O banco armazena somente estado estável da tarefa e referências de autenticação;
+ * conteúdo de cookies nunca é copiado para o SQLite. Bindings usam SQLITE_TRANSIENT
+ * para que o SQLite copie os textos antes de o chamador reutilizar a memória.
+ */
+
 #include "downloader/database.h"
 
 #include <limits.h>
@@ -39,6 +47,11 @@ bool dld_database_open(DldDatabase *database, const char *path, DldAppError *err
         if (db != NULL) sqlite3_close(db);
         return false;
     }
+    /*
+     * WAL permite que a interface leia histórico enquanto workers persistem
+     * progresso. O esquema evita blobs opacos: campos importantes continuam
+     * consultáveis e `options_json` preserva extensibilidade.
+     */
     const char *schema =
         "PRAGMA journal_mode=WAL;"
         "PRAGMA foreign_keys=ON;"
@@ -70,12 +83,14 @@ bool dld_database_open(DldDatabase *database, const char *path, DldAppError *err
     return true;
 }
 
+/* SQLITE_TRANSIENT manda o SQLite copiar a string antes desta função retornar. */
 static void bind_optional_text(sqlite3_stmt *statement, int index, const char *value)
 {
     if (value == NULL) sqlite3_bind_null(statement, index);
     else sqlite3_bind_text(statement, index, value, -1, SQLITE_TRANSIENT);
 }
 
+/* Um UPSERT mantém a mesma linha durante toda a vida da tarefa. */
 bool dld_database_put_task(DldDatabase *database, const DldTaskRecord *task, DldAppError *error)
 {
     if (database == NULL || database->handle == NULL || task == NULL || task->id == NULL) return false;
@@ -117,7 +132,9 @@ bool dld_database_put_task(DldDatabase *database, const DldTaskRecord *task, Dld
         if (task->error.has_code) sqlite3_bind_int(stmt, 15, task->error.code);
         else sqlite3_bind_null(stmt, 15);
     } else {
-        for (int i = 12; i <= 15; ++i) sqlite3_bind_null(stmt, i);
+        for (int i = 12; i <= 15; ++i) {
+            sqlite3_bind_null(stmt, i);
+        }
     }
     sqlite3_bind_int64(stmt, 16, (sqlite3_int64)task->created_at_ms);
     sqlite3_bind_int64(stmt, 17, (sqlite3_int64)task->updated_at_ms);
@@ -221,6 +238,10 @@ bool dld_database_get_task(DldDatabase *database, const char *id,
     return true;
 }
 
+/*
+ * A lista retornada é uma fotografia independente do SQLite. Cada registro é
+ * inicializado como uma struct normal e depois liberado pelo helper público.
+ */
 bool dld_database_list_tasks(DldDatabase *database, DldTaskRecord **tasks,
                              size_t *count, DldAppError *error)
 {
@@ -262,7 +283,9 @@ fail:
 void dld_database_free_task_list(DldTaskRecord *tasks, size_t count)
 {
     if (tasks == NULL) return;
-    for (size_t i = 0U; i < count; ++i) dld_task_record_clear(&tasks[i]);
+    for (size_t i = 0U; i < count; ++i) {
+        dld_task_record_clear(&tasks[i]);
+    }
     free(tasks);
 }
 

@@ -1,3 +1,11 @@
+/*
+ * Publicação do temporário no destino final.
+ *
+ * A engine chama este módulo somente depois da validação por ffprobe. Quando
+ * `rename` cruza filesystems (EXDEV), a cópia é sincronizada antes de remover o
+ * temporário, preservando a entrada original se a gravação falhar no meio.
+ */
+
 #include "downloader/publish.h"
 
 #include <errno.h>
@@ -155,6 +163,11 @@ static char *renamed_candidate(const char *destination)
     return NULL;
 }
 
+/*
+ * Esta é a fronteira entre "resultado em construção" e "arquivo do usuário".
+ * A função nunca publica um temporário inexistente e resolve colisões antes do
+ * movimento final, para que política de nome não fique espalhada pela engine.
+ */
 bool dld_publish_output(const char *temporary, const char *destination,
                         DldCollisionPolicy policy, DldPublishedOutput *output,
                         DldAppError *error)

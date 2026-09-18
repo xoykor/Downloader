@@ -1,6 +1,13 @@
 #ifndef DOWNLOADER_HARDWARE_H
 #define DOWNLOADER_HARDWARE_H
 
+/*
+ * Sondagem de aceleração de vídeo.
+ *
+ * "anunciado" significa que o FFmpeg conhece o backend; "usável" significa que
+ * uma sondagem curta realmente conseguiu inicializar o dispositivo/driver.
+ */
+
 #include "downloader/domain.h"
 
 #include <stdbool.h>

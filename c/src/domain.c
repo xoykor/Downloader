@@ -1,3 +1,10 @@
+/*
+ * Implementação dos tipos de domínio e das regras de ownership.
+ *
+ * Este arquivo deliberadamente não conhece GTK, SQLite, rede ou processos.
+ * Assim as operações de cópia/limpeza continuam previsíveis e testáveis.
+ */
+
 #include "downloader/domain.h"
 
 #include <stdlib.h>
@@ -220,6 +227,11 @@ bool dld_task_record_copy(DldTaskRecord *destination, const DldTaskRecord *sourc
 {
     if (destination == NULL || source == NULL || destination == source) return false;
 
+    /*
+     * Constrói a cópia inteira antes de tocar no destino. Se qualquer alocação
+     * falhar, `destination` continua exatamente como estava e a cópia parcial
+     * é descartada. Esse comportamento torna a função transacional para o chamador.
+     */
     DldTaskRecord copy;
     dld_task_record_init(&copy);
     copy.id = dld_string_duplicate(source->id);
@@ -258,6 +270,7 @@ bool dld_task_record_copy(DldTaskRecord *destination, const DldTaskRecord *sourc
         return false;
     }
 
+    /* Só agora o destino antigo pode ser destruído com segurança. */
     dld_task_record_clear(destination);
     *destination = copy;
     return true;

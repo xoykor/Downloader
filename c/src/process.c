@@ -1,3 +1,11 @@
+/*
+ * Execução de programas externos sem shell intermediário.
+ *
+ * O processo pai drena stdout e stderr em paralelo com `poll`, acompanha timeout
+ * e cancelamento e só termina quando o filho saiu E os dois pipes chegaram a EOF.
+ * Isso evita deadlock por pipe cheio e evita perder as últimas linhas de saída.
+ */
+
 #include "downloader/process.h"
 
 #include <errno.h>
@@ -155,18 +163,27 @@ bool dld_process_run(const DldProcessSpec *spec, atomic_bool *cancel_flag,
     int out_pipe[2] = {-1, -1};
     int err_pipe[2] = {-1, -1};
     if (pipe(out_pipe) != 0 || pipe(err_pipe) != 0) {
-        close_fd(&out_pipe[0]); close_fd(&out_pipe[1]);
-        close_fd(&err_pipe[0]); close_fd(&err_pipe[1]);
+        close_fd(&out_pipe[0]);
+        close_fd(&out_pipe[1]);
+        close_fd(&err_pipe[0]);
+        close_fd(&err_pipe[1]);
         (void)dld_app_error_set(error, DLD_ERROR_INTERNAL, "Não foi possível criar pipes.",
                                 "processo", true, errno);
         return false;
     }
 
+    /*
+     * Depois do fork, o filho só redireciona descritores e chama execvp. O pai
+     * mantém exclusivamente as pontas de leitura dos pipes. Nenhum argumento é
+     * reinterpretado por shell.
+     */
     const pid_t pid = fork();
     if (pid < 0) {
         const int saved = errno;
-        close_fd(&out_pipe[0]); close_fd(&out_pipe[1]);
-        close_fd(&err_pipe[0]); close_fd(&err_pipe[1]);
+        close_fd(&out_pipe[0]);
+        close_fd(&out_pipe[1]);
+        close_fd(&err_pipe[0]);
+        close_fd(&err_pipe[1]);
         (void)dld_app_error_set(error, DLD_ERROR_DEPENDENCY, "Não foi possível iniciar processo.",
                                 "processo", true, saved);
         return false;
@@ -175,8 +192,10 @@ bool dld_process_run(const DldProcessSpec *spec, atomic_bool *cancel_flag,
     if (pid == 0) {
         (void)dup2(out_pipe[1], STDOUT_FILENO);
         (void)dup2(err_pipe[1], STDERR_FILENO);
-        close_fd(&out_pipe[0]); close_fd(&out_pipe[1]);
-        close_fd(&err_pipe[0]); close_fd(&err_pipe[1]);
+        close_fd(&out_pipe[0]);
+        close_fd(&out_pipe[1]);
+        close_fd(&err_pipe[0]);
+        close_fd(&err_pipe[1]);
         if (spec->working_directory != NULL && chdir(spec->working_directory) != 0) _exit(126);
         execvp(spec->program, spec->argv);
         _exit(errno == ENOENT ? 127 : 126);
@@ -199,7 +218,13 @@ bool dld_process_run(const DldProcessSpec *spec, atomic_bool *cancel_flag,
     bool sent_termination = false;
     uint64_t termination_sent_at = 0U;
 
+    /*
+     * Sair apenas quando `waitpid` confirmou o filho E ambos os pipes chegaram
+     * a EOF. Um processo pode terminar antes de o kernel entregar os últimos
+     * bytes de stdout/stderr, então parar só em `waitpid` perderia saída.
+     */
     while (!child_exited || !stdout_eof || !stderr_eof) {
+        /* Cancelamento cooperativo primeiro: SIGTERM dá chance de cleanup ao filho. */
         if (!sent_termination && cancel_flag != NULL && atomic_load(cancel_flag)) {
             result->cancelled = true;
             (void)kill(pid, SIGTERM);
@@ -216,6 +241,7 @@ bool dld_process_run(const DldProcessSpec *spec, atomic_bool *cancel_flag,
             }
         }
 
+        /* Se SIGTERM não funcionar em 2 s, evita deixar processo órfão com SIGKILL. */
         if (sent_termination && !child_exited && termination_sent_at > 0U &&
             monotonic_ms() - termination_sent_at >= UINT64_C(2000)) {
             (void)kill(pid, SIGKILL);
@@ -267,8 +293,11 @@ io_failure:
         const int saved = errno;
         (void)kill(pid, SIGKILL);
         (void)waitpid(pid, NULL, 0);
-        close_fd(&out_pipe[0]); close_fd(&err_pipe[0]);
-        buffer_clear(&stdout_buffer); buffer_clear(&stderr_buffer); buffer_clear(&line_buffer);
+        close_fd(&out_pipe[0]);
+        close_fd(&err_pipe[0]);
+        buffer_clear(&stdout_buffer);
+        buffer_clear(&stderr_buffer);
+        buffer_clear(&line_buffer);
         (void)dld_app_error_set(error, DLD_ERROR_INTERNAL, "Falha ao ler saída do processo.",
                                 "processo", true, saved);
         return false;
