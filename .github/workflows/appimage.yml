@@ -65,16 +65,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/Downloader-x86_64.AppImage dist/Downloader-x86_64.AppImage.sha256 --generate-notes
 
-      - name: Publicar v0.2.0 da migração C17
-        if: github.ref == 'refs/heads/master' && contains(github.event.head_commit.message, '[release-v0.2.0]')
+      - name: Criar tag de release solicitada pelo commit
+        if: github.ref == 'refs/heads/master' && contains(github.event.head_commit.message, '[release-v')
         env:
-          GH_TOKEN: ${{ github.token }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
-          git tag v0.2.0 "$GITHUB_SHA"
-          git push origin v0.2.0
-          gh release create v0.2.0 \
-            dist/Downloader-x86_64.AppImage \
-            dist/Downloader-x86_64.AppImage.sha256 \
-            --target "$GITHUB_SHA" \
-            --title "v0.2.0 — C17 + GTK4" \
-            --generate-notes
+          VERSION="$(printf '%s' "$COMMIT_MESSAGE" | sed -n 's/.*\[release-\(v[^]]*\)\].*/\1/p')"
+          test -n "$VERSION"
+          git tag "$VERSION" "$GITHUB_SHA"
+          git push origin "$VERSION"
