@@ -661,6 +661,7 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
                                 "Download terminou sem arquivos de saída.", "download", true, errno);
         dld_media_summary_clear(&summary);
         free(tmp_dir);
+        free(process_error);
         goto fail;
     }
     size_t published = 0U;
