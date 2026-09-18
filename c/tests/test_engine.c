@@ -13,6 +13,7 @@
 typedef struct {
     size_t child_progress_events;
     size_t child_completed_events;
+    char child_completed_path[768];
 } EventStats;
 
 static void write_le16(FILE *file, uint16_t value)
@@ -119,6 +120,22 @@ static void write_fake_ytdlp(const char *path, const char *fixture)
         "\"$dir\"\n",
         script);
 
+    /*
+     * O processo continua vivo depois do FILE. O arquivo precisa desaparecer do
+     * staging enquanto a playlist ainda está em execução; caso contrário o teste
+     * remove a origem para impedir a publicação tardia após o exit.
+     */
+    fputs("i=0\n", script);
+    fputs("while [ -e \"$dir/Faixa Um [id1].wav\" ] && [ \"$i\" -lt 40 ]; do\n", script);
+    fputs("  sleep 0.05\n", script);
+    fputs("  i=$((i + 1))\n", script);
+    fputs("done\n", script);
+    fputs("if [ -e \"$dir/Faixa Um [id1].wav\" ]; then\n", script);
+    fputs("  rm -f \"$dir/Faixa Um [id1].wav\"\n", script);
+    fputs("  printf '%s\\n' 'faixa não foi publicada durante a playlist' >&2\n", script);
+    fputs("  exit 0\n", script);
+    fputs("fi\n", script);
+
     fputs("printf '%s\\n' 'item id2 indisponível' >&2\n", script);
     fputs("exit 1\n", script);
 
@@ -137,6 +154,13 @@ static void capture_event(const DldEngineEvent *event, void *userdata)
     }
     if (event->status == DLD_STATUS_COMPLETED) {
         ++stats->child_completed_events;
+        if (event->path != NULL) {
+            (void)snprintf(
+                stats->child_completed_path,
+                sizeof(stats->child_completed_path),
+                "%s",
+                event->path);
+        }
     }
 }
 
@@ -201,6 +225,11 @@ static void test_partial_playlist(DldEngine *engine,
     assert(task.status == DLD_STATUS_COMPLETED);
     assert(stats.child_progress_events > 0U);
     assert(stats.child_completed_events > 0U);
+    assert(stats.child_completed_path[0] != '\0');
+    assert(strncmp(
+        stats.child_completed_path,
+        output,
+        strlen(output)) == 0);
 
     unsigned youtube_starts = 0U;
     uint64_t oldest_start = 0U;

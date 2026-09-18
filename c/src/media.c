@@ -297,9 +297,13 @@ bool dld_build_download_command(const char *yt_dlp, const char *url,
         goto oom;
     }
     if (youtube_protection) {
-        if (!command_push_pair(command, "--sleep-requests", "5.4") ||
-            !command_push_pair(command, "--sleep-interval", "5") ||
-            !command_push_pair(command, "--max-sleep-interval", "5") ||
+        /*
+         * O limite móvel de 300/90 min continua sendo a proteção principal.
+         * Um intervalo curto de 1 s evita rajadas entre faixas sem impor a
+         * latência de 5 s por download + 5,4 s por requisição da versão anterior.
+         */
+        if (!command_push_pair(command, "--sleep-interval", "1") ||
+            !command_push_pair(command, "--max-sleep-interval", "1") ||
             !command_push_pair(command, "--concurrent-fragments", "1") ||
             !command_push_pair(command, "--retries", "3") ||
             !command_push_pair(command, "--fragment-retries", "3")) {
