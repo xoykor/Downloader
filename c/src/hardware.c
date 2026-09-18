@@ -30,8 +30,7 @@ static bool output_lists_backend(const char *output, const char *backend)
     const size_t length = strlen(backend);
     const char *line = output;
     while (*line != '\0') {
-        const char *end = strchr(line, '
-');
+        const char *end = strchr(line, '\n');
         const size_t line_len = end == NULL ? strlen(line) : (size_t)(end - line);
         if (line_len == length && strncmp(line, backend, length) == 0) return true;
         if (end == NULL) break;
@@ -44,11 +43,9 @@ static char *last_line_copy(const char *text)
 {
     if (text == NULL || *text == '\0') return NULL;
     const char *end = text + strlen(text);
-    while (end > text && (end[-1] == '
-' || end[-1] == '')) --end;
+    while (end > text && (end[-1] == '\n' || end[-1] == '\r')) --end;
     const char *start = end;
-    while (start > text && start[-1] != '
-') --start;
+    while (start > text && start[-1] != '\n') --start;
     const size_t length = (size_t)(end - start);
     char *copy = malloc(length + 1U);
     if (copy == NULL) return NULL;

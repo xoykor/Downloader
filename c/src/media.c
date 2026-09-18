@@ -104,7 +104,7 @@ bool dld_validate_netscape_cookie_file(const char *path, DldAppError *error)
         while (isspace((unsigned char)*start)) ++start;
         if (*start == '\0' || *start == '#') continue;
         unsigned tabs = 0U;
-        for (const char *p = start; *p != '\0'; ++p) if (*p == '	') ++tabs;
+        for (const char *p = start; *p != '\0'; ++p) if (*p == '\t') ++tabs;
         if (tabs >= 6U) {
             valid = true;
             break;
@@ -451,7 +451,7 @@ DldProgress dld_parse_progress_line(const char *line)
     char *copy = dld_string_duplicate(line);
     if (copy == NULL) return progress;
     char *save = NULL;
-    for (char *part = strtok_r(copy, " 	", &save); part != NULL; part = strtok_r(NULL, " 	", &save)) {
+    for (char *part = strtok_r(copy, " \t", &save); part != NULL; part = strtok_r(NULL, " \t", &save)) {
         char *equals = strchr(part, '=');
         if (equals == NULL) continue;
         *equals = '\0';
