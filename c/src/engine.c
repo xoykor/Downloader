@@ -383,6 +383,16 @@ typedef struct {
     DldEngineEventCallback callback;
     void *userdata;
     bool account_youtube_starts;
+
+    /*
+     * Publicação incremental da playlist. Cada FILE do yt-dlp é validado e
+     * movido imediatamente para o destino final, sem esperar a playlist acabar.
+     */
+    const char *destination_dir;
+    const char *format;
+    size_t published;
+    size_t failed_items;
+    char *last_path;
 } ProgressContext;
 
 static char *track_event_id(const DldTaskRecord *task,
@@ -428,6 +438,135 @@ static void track_display_message(const DldTrackLine *track,
     } else {
         (void)snprintf(buffer, buffer_size, "%s", title);
     }
+}
+
+static bool publish_finished_track(ProgressContext *context,
+                                  const DldTrackLine *track,
+                                  const char *event_id,
+                                  const char *message)
+{
+    if (track->filepath[0] == '\0' || !regular_file(track->filepath)) {
+        return false;
+    }
+
+    /*
+     * A linha FILE só chega depois do pós-processamento do yt-dlp. Nesse ponto
+     * já é seguro validar e retirar a faixa do staging enquanto o yt-dlp segue
+     * para o próximo item da playlist.
+     */
+    emit_event(
+        context->callback,
+        context->userdata,
+        event_id,
+        DLD_STATUS_VALIDATING,
+        true,
+        100.0,
+        NULL,
+        message,
+        NULL);
+
+    DldAppError item_error;
+    dld_app_error_init(&item_error);
+
+    DldProbeSummary probe;
+    dld_probe_summary_init(&probe);
+    if (!probe_file(
+            context->engine,
+            track->filepath,
+            &probe,
+            &item_error)) {
+        goto fail;
+    }
+    dld_probe_summary_clear(&probe);
+
+    const char *filename = basename_ptr(track->filepath);
+    if (filename == NULL || *filename == '\0') {
+        (void)dld_app_error_set(
+            &item_error,
+            DLD_ERROR_INVALID_MEDIA,
+            "Arquivo concluído sem nome válido.",
+            "publicação",
+            false,
+            0);
+        goto fail_without_probe;
+    }
+
+    char *destination = path_join(
+        context->destination_dir,
+        filename);
+    if (destination == NULL) {
+        (void)dld_app_error_set(
+            &item_error,
+            DLD_ERROR_INTERNAL,
+            "Memória insuficiente para publicar a faixa.",
+            "publicação",
+            false,
+            0);
+        goto fail_without_probe;
+    }
+
+    DldPublishedOutput output;
+    dld_published_output_init(&output);
+    if (!dld_publish_output(
+            track->filepath,
+            destination,
+            context->task->collision,
+            &output,
+            &item_error)) {
+        dld_published_output_clear(&output);
+        free(destination);
+        goto fail_without_probe;
+    }
+
+    if (track->id[0] != '\0') {
+        DldAppError index_error;
+        dld_app_error_init(&index_error);
+        (void)dld_library_record(
+            context->destination_dir,
+            track->id,
+            context->format,
+            output.path,
+            &index_error);
+        dld_app_error_clear(&index_error);
+    }
+
+    free(context->last_path);
+    context->last_path = dld_string_duplicate(output.path);
+    ++context->published;
+
+    emit_event(
+        context->callback,
+        context->userdata,
+        event_id,
+        DLD_STATUS_COMPLETED,
+        true,
+        100.0,
+        NULL,
+        message,
+        output.path);
+
+    dld_published_output_clear(&output);
+    free(destination);
+    dld_app_error_clear(&item_error);
+    return true;
+
+fail:
+    dld_probe_summary_clear(&probe);
+
+fail_without_probe:
+    ++context->failed_items;
+    emit_event(
+        context->callback,
+        context->userdata,
+        event_id,
+        DLD_STATUS_FAILED,
+        false,
+        0.0,
+        NULL,
+        item_error.message != NULL ? item_error.message : message,
+        NULL);
+    dld_app_error_clear(&item_error);
+    return false;
 }
 
 static void download_progress_line(const char *line, void *userdata)
@@ -478,16 +617,16 @@ static void download_progress_line(const char *line, void *userdata)
             message,
             NULL);
     } else if (track.kind == DLD_TRACK_LINE_FILE) {
-        emit_event(
-            context->callback,
-            context->userdata,
+        /*
+         * Publica agora. O caminho temporário nunca aparece como se fosse o
+         * destino do usuário; o evento final já aponta para Downloads (ou para a
+         * pasta escolhida na tarefa).
+         */
+        (void)publish_finished_track(
+            context,
+            &track,
             event_id,
-            DLD_STATUS_VALIDATING,
-            true,
-            100.0,
-            NULL,
-            message,
-            track.filepath[0] != '\0' ? track.filepath : NULL);
+            message);
     }
 
     free(event_id);
@@ -663,6 +802,11 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
         .callback = callback,
         .userdata = userdata,
         .account_youtube_starts = youtube_limited,
+        .destination_dir = destination_dir,
+        .format = format,
+        .published = 0U,
+        .failed_items = 0U,
+        .last_path = NULL,
     };
 
     if (ok) {
@@ -701,6 +845,7 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
     free(template_path);
 
     if (!ok) {
+        free(progress_context.last_path);
         free(process_error);
         dld_media_summary_clear(&summary);
         free(tmp_dir);
@@ -722,9 +867,15 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
         free(process_error);
         goto fail;
     }
-    size_t published = 0U;
-    size_t failed_items = 0U;
-    char *last_path = NULL;
+    /*
+     * Normalmente os arquivos já foram publicados pelos eventos FILE. Esta
+     * varredura fica como fallback para versões/formatos do yt-dlp que não
+     * emitirem o evento after_move esperado.
+     */
+    size_t published = progress_context.published;
+    size_t failed_items = progress_context.failed_items;
+    char *last_path = progress_context.last_path;
+    progress_context.last_path = NULL;
     struct dirent *entry;
 
     while ((entry = readdir(directory)) != NULL) {
