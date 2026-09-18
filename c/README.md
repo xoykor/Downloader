@@ -23,7 +23,7 @@ c/
 ```
 
 ## Regras de legibilidade
-
+\nVeja também [`CODING_STYLE.md`](CODING_STYLE.md) para as convenções de comentários, ownership e formatação.\n\n
 - C17 padrão; POSIX só onde o Linux realmente precisa (`fork`, `exec`, `poll`).
 - cada função deixa explícito quem aloca e quem libera memória;
 - prefixo `dld_` em símbolos públicos;
