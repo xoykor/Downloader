@@ -31,7 +31,7 @@ typedef struct {
     DesktopApp *app;
     char *url;
     gboolean playlist;
-    gboolean has_auth;
+    bool has_auth;
     DldAuthRef auth;
 } AnalyzeJob;
 
