@@ -32,6 +32,49 @@ int main(void)
     assert(progress.has_percent && progress.percent > 42.4 && progress.percent < 42.6);
     assert(progress.has_eta);
 
+    dld_command_clear(&command);
+
+    dld_command_init(&command);
+    assert(dld_build_download_command("yt-dlp", "https://example.test/playlist",
+                                      "/tmp/%(id)s.%(ext)s", true,
+                                      "video+audio", "auto", 0U, "auto", true,
+                                      NULL, &command, &error));
+    bool saw_yes_playlist = false;
+    bool saw_ignore_errors = false;
+    bool saw_track_template = false;
+    bool saw_after_move = false;
+    for (size_t i = 0; i < command.argc; ++i) {
+        if (strcmp(command.argv[i], "--yes-playlist") == 0) saw_yes_playlist = true;
+        if (strcmp(command.argv[i], "--ignore-errors") == 0) saw_ignore_errors = true;
+        if (strncmp(command.argv[i], "TRACK ", 6U) == 0) saw_track_template = true;
+        if (strncmp(command.argv[i], "after_move:FILE ", 16U) == 0) saw_after_move = true;
+    }
+    assert(saw_yes_playlist && saw_ignore_errors);
+    assert(saw_track_template && saw_after_move);
+
+    DldTrackLine track;
+    assert(dld_parse_track_line(
+        "TRACK {\"id\":\"abc\",\"title\":\"Minha faixa\","
+        "\"playlist_index\":2,\"playlist_count\":8} "
+        "{\"_percent_str\":\"37.5%\",\"_speed_str\":\"2.1MiB/s\","
+        "\"eta\":12,\"status\":\"downloading\"}",
+        &track));
+    assert(track.kind == DLD_TRACK_LINE_PROGRESS);
+    assert(strcmp(track.id, "abc") == 0);
+    assert(strcmp(track.title, "Minha faixa") == 0);
+    assert(track.playlist_index == 2U && track.playlist_count == 8U);
+    assert(track.progress.has_percent);
+    assert(track.progress.percent > 37.4 && track.progress.percent < 37.6);
+    assert(strcmp(track.progress.speed, "2.1MiB/s") == 0);
+
+    assert(dld_parse_track_line(
+        "FILE {\"id\":\"abc\",\"title\":\"Minha faixa\","
+        "\"playlist_index\":2,\"playlist_count\":8,"
+        "\"filepath\":\"/tmp/Minha faixa [abc].webm\"}",
+        &track));
+    assert(track.kind == DLD_TRACK_LINE_FILE);
+    assert(strcmp(track.filepath, "/tmp/Minha faixa [abc].webm") == 0);
+
     dld_command_clear(&command); dld_probe_summary_clear(&probe);
     dld_media_summary_clear(&media); dld_app_error_clear(&error);
     puts("test_media: ok");

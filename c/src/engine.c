@@ -90,14 +90,21 @@ static bool regular_file(const char *path)
     return path != NULL && stat(path, &st) == 0 && S_ISREG(st.st_mode);
 }
 
-static void emit(DldEngineEventCallback callback, void *userdata, const DldTaskRecord *task,
-                 bool has_progress, double progress, const char *speed,
-                 const char *message, const char *path)
+static void emit_event(DldEngineEventCallback callback,
+                       void *userdata,
+                       const char *task_id,
+                       DldTaskStatus status,
+                       bool has_progress,
+                       double progress,
+                       const char *speed,
+                       const char *message,
+                       const char *path)
 {
     if (callback == NULL) return;
+
     const DldEngineEvent event = {
-        .task_id = task != NULL ? task->id : NULL,
-        .status = task != NULL ? task->status : DLD_STATUS_FAILED,
+        .task_id = task_id,
+        .status = status,
         .has_progress = has_progress,
         .progress_percent = progress,
         .speed = speed,
@@ -105,6 +112,27 @@ static void emit(DldEngineEventCallback callback, void *userdata, const DldTaskR
         .path = path,
     };
     callback(&event, userdata);
+}
+
+static void emit(DldEngineEventCallback callback,
+                 void *userdata,
+                 const DldTaskRecord *task,
+                 bool has_progress,
+                 double progress,
+                 const char *speed,
+                 const char *message,
+                 const char *path)
+{
+    emit_event(
+        callback,
+        userdata,
+        task != NULL ? task->id : NULL,
+        task != NULL ? task->status : DLD_STATUS_FAILED,
+        has_progress,
+        progress,
+        speed,
+        message,
+        path);
 }
 
 DldEngineConfig dld_engine_config_default(void)
@@ -352,14 +380,92 @@ typedef struct {
     void *userdata;
 } ProgressContext;
 
+static char *track_event_id(const DldTaskRecord *task,
+                            const char *media_id,
+                            size_t playlist_index)
+{
+    if (task == NULL || task->id == NULL) return NULL;
+
+    char fallback[64];
+    const char *suffix = media_id;
+    if (suffix == NULL || *suffix == '\0') {
+        (void)snprintf(
+            fallback,
+            sizeof(fallback),
+            "faixa-%zu",
+            playlist_index > 0U ? playlist_index : 1U);
+        suffix = fallback;
+    }
+
+    const size_t length = strlen(task->id) + strlen(suffix) + 3U;
+    char *id = malloc(length);
+    if (id != NULL) {
+        (void)snprintf(id, length, "%s::%s", task->id, suffix);
+    }
+    return id;
+}
+
+static void track_display_message(const DldTrackLine *track,
+                                  char *buffer,
+                                  size_t buffer_size)
+{
+    const char *title =
+        track->title[0] != '\0' ? track->title : "Faixa";
+
+    if (track->playlist_index > 0U && track->playlist_count > 0U) {
+        (void)snprintf(
+            buffer,
+            buffer_size,
+            "%zu/%zu · %s",
+            track->playlist_index,
+            track->playlist_count,
+            title);
+    } else {
+        (void)snprintf(buffer, buffer_size, "%s", title);
+    }
+}
+
 static void download_progress_line(const char *line, void *userdata)
 {
     ProgressContext *context = userdata;
-    DldProgress progress = dld_parse_progress_line(line);
-    if (progress.has_percent) {
-        emit(context->callback, context->userdata, context->task, true, progress.percent,
-             progress.speed[0] != '\0' ? progress.speed : NULL, "Baixando", NULL);
+    DldTrackLine track;
+
+    if (!dld_parse_track_line(line, &track)) return;
+
+    char *event_id = track_event_id(
+        context->task,
+        track.id,
+        track.playlist_index);
+    if (event_id == NULL) return;
+
+    char message[640];
+    track_display_message(&track, message, sizeof(message));
+
+    if (track.kind == DLD_TRACK_LINE_PROGRESS) {
+        emit_event(
+            context->callback,
+            context->userdata,
+            event_id,
+            DLD_STATUS_DOWNLOADING,
+            track.progress.has_percent,
+            track.progress.percent,
+            track.progress.speed[0] != '\0' ? track.progress.speed : NULL,
+            message,
+            NULL);
+    } else if (track.kind == DLD_TRACK_LINE_FILE) {
+        emit_event(
+            context->callback,
+            context->userdata,
+            event_id,
+            DLD_STATUS_VALIDATING,
+            true,
+            100.0,
+            NULL,
+            message,
+            track.filepath[0] != '\0' ? track.filepath : NULL);
     }
+
+    free(event_id);
 }
 
 static bool set_task_destination(DldTaskRecord *task, const char *path)
@@ -429,14 +535,36 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
     }
 
     if (is_youtube_url(task->input_url)) {
-        size_t requested = playlist && summary.playlist_entries > 0U ? summary.playlist_entries : 1U;
-        while (requested > 0U) {
-            const unsigned batch = requested > 300U ? 300U : (unsigned)requested;
-            if (!youtube_acquire_slots(engine, batch, cancel_flag, error)) {
-                dld_media_summary_clear(&summary);
-                goto fail;
-            }
-            requested -= batch;
+        const size_t requested =
+            playlist && summary.playlist_entries > 0U
+                ? summary.playlist_entries
+                : 1U;
+
+        /*
+         * Reservar lotes sucessivos antes de iniciar fazia playlists >300 ficarem
+         * paradas por até 90 minutos sem baixar nada. A proteção é conservadora:
+         * uma única execução pode reservar no máximo a janela inteira.
+         */
+        if (engine->youtube_protection && requested > 300U) {
+            (void)dld_app_error_set(
+                error,
+                DLD_ERROR_NETWORK,
+                "A proteção do YouTube limita uma playlist a 300 itens por execução. "
+                "Divida a playlist ou desative a proteção nas configurações.",
+                "limite YouTube",
+                false,
+                0);
+            dld_media_summary_clear(&summary);
+            goto fail;
+        }
+
+        if (!youtube_acquire_slots(
+                engine,
+                (unsigned)requested,
+                cancel_flag,
+                error)) {
+            dld_media_summary_clear(&summary);
+            goto fail;
         }
     }
 
@@ -459,30 +587,73 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
     DldProcessResult result;
     dld_command_init(&command);
     dld_process_result_init(&result);
-    bool ok = dld_build_download_command(engine->yt_dlp, task->input_url, template_path,
-                                         playlist, kind, format, max_height, bitrate,
-                                         engine->youtube_protection, auth, &command, error);
-    ProgressContext progress_context = {.task = task, .callback = callback, .userdata = userdata};
-    if (ok) ok = run_command(&command, 0U, cancel_flag, download_progress_line,
-                             &progress_context, &result, error);
-    if (ok && (result.cancelled || cancel_requested(cancel_flag))) {
-        (void)dld_app_error_set(error, DLD_ERROR_CANCELLED, "Download cancelado.", "download", false, 0);
-        ok = false;
-    } else if (ok && result.exit_code != 0) {
-        (void)dld_app_error_set(error, DLD_ERROR_NETWORK,
-                                result.stderr_text != NULL && *result.stderr_text != '\0' ?
-                                result.stderr_text : "yt-dlp falhou.",
-                                "download", true, result.exit_code);
+    bool ok = dld_build_download_command(
+        engine->yt_dlp,
+        task->input_url,
+        template_path,
+        playlist,
+        kind,
+        format,
+        max_height,
+        bitrate,
+        engine->youtube_protection,
+        auth,
+        &command,
+        error);
+
+    ProgressContext progress_context = {
+        .task = task,
+        .callback = callback,
+        .userdata = userdata,
+    };
+
+    if (ok) {
+        ok = run_command(
+            &command,
+            0U,
+            cancel_flag,
+            download_progress_line,
+            &progress_context,
+            &result,
+            error);
+    }
+
+    const bool process_cancelled =
+        ok && (result.cancelled || cancel_requested(cancel_flag));
+    const int process_exit_code = ok ? result.exit_code : -1;
+    char *process_error = NULL;
+
+    if (ok && result.stderr_text != NULL && *result.stderr_text != '\0') {
+        process_error = dld_string_duplicate(result.stderr_text);
+    }
+
+    if (process_cancelled) {
+        (void)dld_app_error_set(
+            error,
+            DLD_ERROR_CANCELLED,
+            "Download cancelado.",
+            "download",
+            false,
+            0);
         ok = false;
     }
+
     dld_command_clear(&command);
     dld_process_result_clear(&result);
     free(template_path);
+
     if (!ok) {
+        free(process_error);
         dld_media_summary_clear(&summary);
         free(tmp_dir);
         goto fail;
     }
+
+    /*
+     * Não abortamos só porque o yt-dlp terminou com código diferente de zero.
+     * Em playlists isso pode significar que UMA faixa foi removida, enquanto
+     * várias outras já estão completas no staging e devem ser publicadas.
+     */
 
     DIR *directory = opendir(tmp_dir);
     if (directory == NULL) {
@@ -490,72 +661,213 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
                                 "Download terminou sem arquivos de saída.", "download", true, errno);
         dld_media_summary_clear(&summary);
         free(tmp_dir);
+        free(process_error);
         goto fail;
     }
     size_t published = 0U;
+    size_t failed_items = 0U;
     char *last_path = NULL;
     struct dirent *entry;
+
     while ((entry = readdir(directory)) != NULL) {
-        if (entry->d_name[0] == '.' || is_auxiliary_download_file(entry->d_name)) continue;
+        if (entry->d_name[0] == '.' ||
+            is_auxiliary_download_file(entry->d_name)) {
+            continue;
+        }
+
         char *source = path_join(tmp_dir, entry->d_name);
         if (source == NULL || !regular_file(source)) {
             free(source);
             continue;
         }
+
+        char *media_id = extract_id_from_filename(entry->d_name);
+        char *child_id = track_event_id(task, media_id, published + failed_items + 1U);
+        char *display_name = stem_copy(entry->d_name);
+
+        if (display_name != NULL && media_id != NULL) {
+            char suffix[256];
+            (void)snprintf(suffix, sizeof(suffix), " [%s]", media_id);
+            const size_t name_length = strlen(display_name);
+            const size_t suffix_length = strlen(suffix);
+            if (name_length >= suffix_length &&
+                strcmp(display_name + name_length - suffix_length, suffix) == 0) {
+                display_name[name_length - suffix_length] = '\0';
+            }
+        }
+
         DldProbeSummary probe;
         dld_probe_summary_init(&probe);
         if (!probe_file(engine, source, &probe, error)) {
             dld_probe_summary_clear(&probe);
+
+            if (playlist) {
+                emit_event(
+                    callback,
+                    userdata,
+                    child_id != NULL ? child_id : task->id,
+                    DLD_STATUS_FAILED,
+                    false,
+                    0.0,
+                    NULL,
+                    display_name != NULL ? display_name : "Faixa inválida",
+                    NULL);
+                ++failed_items;
+                dld_app_error_clear(error);
+                free(display_name);
+                free(child_id);
+                free(media_id);
+                free(source);
+                continue;
+            }
+
+            free(display_name);
+            free(child_id);
+            free(media_id);
             free(source);
             closedir(directory);
             dld_media_summary_clear(&summary);
             free(tmp_dir);
             free(last_path);
+            free(process_error);
             goto fail;
         }
         dld_probe_summary_clear(&probe);
+
         char *destination = path_join(destination_dir, entry->d_name);
         if (destination == NULL) {
+            free(display_name);
+            free(child_id);
+            free(media_id);
             free(source);
             continue;
         }
+
         DldPublishedOutput output;
         dld_published_output_init(&output);
-        if (!dld_publish_output(source, destination, task->collision, &output, error)) {
+
+        if (!dld_publish_output(
+                source,
+                destination,
+                task->collision,
+                &output,
+                error)) {
             dld_published_output_clear(&output);
+
+            if (playlist) {
+                emit_event(
+                    callback,
+                    userdata,
+                    child_id != NULL ? child_id : task->id,
+                    DLD_STATUS_FAILED,
+                    false,
+                    0.0,
+                    NULL,
+                    display_name != NULL ? display_name : "Falha ao publicar faixa",
+                    NULL);
+                ++failed_items;
+                dld_app_error_clear(error);
+                free(destination);
+                free(display_name);
+                free(child_id);
+                free(media_id);
+                free(source);
+                continue;
+            }
+
             free(destination);
+            free(display_name);
+            free(child_id);
+            free(media_id);
             free(source);
             closedir(directory);
             dld_media_summary_clear(&summary);
             free(tmp_dir);
             free(last_path);
+            free(process_error);
             goto fail;
         }
-        char *media_id = extract_id_from_filename(entry->d_name);
+
         if (media_id != NULL) {
-            (void)dld_library_record(destination_dir, media_id, format, output.path, error);
+            (void)dld_library_record(
+                destination_dir,
+                media_id,
+                format,
+                output.path,
+                error);
             dld_app_error_clear(error);
-            free(media_id);
         }
+
         free(last_path);
         last_path = dld_string_duplicate(output.path);
         ++published;
-        emit(callback, userdata, task, true, 100.0, NULL, "Arquivo validado e publicado", output.path);
+
+        emit_event(
+            callback,
+            userdata,
+            child_id != NULL ? child_id : task->id,
+            DLD_STATUS_COMPLETED,
+            true,
+            100.0,
+            NULL,
+            display_name != NULL ? display_name : "Faixa concluída",
+            output.path);
+
         dld_published_output_clear(&output);
         free(destination);
+        free(display_name);
+        free(child_id);
+        free(media_id);
         free(source);
     }
+
     closedir(directory);
     (void)rmdir(tmp_dir);
     free(tmp_dir);
     dld_media_summary_clear(&summary);
+
     if (published == 0U) {
         free(last_path);
-        (void)dld_app_error_set(error, DLD_ERROR_INVALID_MEDIA,
-                                "Nenhum arquivo de mídia válido foi produzido.", "download", false, 0);
+
+        if (process_exit_code != 0 && process_error != NULL) {
+            (void)dld_app_error_set(
+                error,
+                DLD_ERROR_NETWORK,
+                process_error,
+                "download",
+                true,
+                process_exit_code);
+        } else {
+            (void)dld_app_error_set(
+                error,
+                DLD_ERROR_INVALID_MEDIA,
+                "Nenhum arquivo de mídia válido foi produzido.",
+                "download",
+                false,
+                0);
+        }
+
+        free(process_error);
         goto fail;
     }
-    if (!playlist && last_path != NULL) (void)set_task_destination(task, last_path);
+
+    if (playlist && (failed_items > 0U || process_exit_code != 0)) {
+        emit(
+            callback,
+            userdata,
+            task,
+            false,
+            0.0,
+            NULL,
+            "Playlist concluída parcialmente; itens disponíveis foram salvos.",
+            destination_dir);
+    }
+
+    if (!playlist && last_path != NULL) {
+        (void)set_task_destination(task, last_path);
+    }
+
+    free(process_error);
     free(last_path);
     free(format);
     free(kind);

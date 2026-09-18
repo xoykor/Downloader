@@ -194,8 +194,13 @@ bool dld_build_analysis_command(const char *yt_dlp, const char *url, bool playli
     if (!begin_command(command, yt_dlp, error)) return false;
     if (!command_push(command, "-J") || !command_push(command, "--simulate")) goto oom;
     if (playlist) {
-        if (!command_push(command, "--flat-playlist")) goto oom;
-    } else if (!command_push(command, "--no-playlist")) goto oom;
+        if (!command_push(command, "--flat-playlist") ||
+            !command_push(command, "--lazy-playlist")) {
+            goto oom;
+        }
+    } else if (!command_push(command, "--no-playlist")) {
+        goto oom;
+    }
     if (!append_auth(command, auth, error)) return false;
     if (!command_push(command, url)) goto oom;
     return true;
@@ -247,11 +252,38 @@ bool dld_build_download_command(const char *yt_dlp, const char *url,
         return false;
     }
     if (!begin_command(command, yt_dlp, error)) return false;
-    if (!playlist && !command_push(command, "--no-playlist")) goto oom;
+    if (playlist) {
+        /*
+         * Seja explícito: alguns URLs misturam vídeo e playlist, e a intenção da
+         * UI deve vencer a heurística padrão do yt-dlp. --ignore-errors mantém a
+         * playlist andando quando um item foi removido, ficou privado ou falhou.
+         */
+        if (!command_push(command, "--yes-playlist") ||
+            !command_push(command, "--ignore-errors")) {
+            goto oom;
+        }
+    } else if (!command_push(command, "--no-playlist")) {
+        goto oom;
+    }
+
+    /*
+     * A linha de progresso carrega metadados da faixa e progresso como dois JSONs.
+     * O parser C consegue assim identificar cada música/vídeo sem depender de
+     * títulos formatados para humanos.
+     */
     if (!command_push(command, "--newline") ||
-        !command_push_pair(command, "--progress-template",
-                           "percent=%(progress._percent_str)s eta=%(progress.eta)s "
-                           "speed=%(progress._speed_str)s")) {
+        !command_push(command, "--progress") ||
+        !command_push(command, "--no-quiet") ||
+        !command_push_pair(command, "--progress-delta", "0.2") ||
+        !command_push_pair(
+            command,
+            "--progress-template",
+            "TRACK %(info.{id,title,playlist_index,playlist_count})j "
+            "%(progress.{_percent_str,_speed_str,eta,status})j") ||
+        !command_push_pair(
+            command,
+            "--print",
+            "after_move:FILE %(.{id,title,playlist_index,playlist_count,filepath})j")) {
         goto oom;
     }
     if (youtube_protection) {
@@ -505,6 +537,172 @@ DldProgress dld_parse_progress_line(const char *line)
     }
     free(copy);
     return progress;
+}
+
+
+static void copy_json_string_field(struct json_object *object,
+                                   const char *key,
+                                   char *buffer,
+                                   size_t buffer_size)
+{
+    if (object == NULL || buffer == NULL || buffer_size == 0U) return;
+
+    struct json_object *value = NULL;
+    if (!json_object_object_get_ex(object, key, &value) ||
+        value == NULL ||
+        !json_object_is_type(value, json_type_string)) {
+        return;
+    }
+
+    const char *text = json_object_get_string(value);
+    if (text != NULL) {
+        (void)snprintf(buffer, buffer_size, "%s", text);
+    }
+}
+
+static size_t json_size_field(struct json_object *object, const char *key)
+{
+    if (object == NULL) return 0U;
+
+    struct json_object *value = NULL;
+    if (!json_object_object_get_ex(object, key, &value) || value == NULL) {
+        return 0U;
+    }
+
+    if (json_object_is_type(value, json_type_int)) {
+        const int64_t number = json_object_get_int64(value);
+        return number > 0 ? (size_t)number : 0U;
+    }
+
+    if (json_object_is_type(value, json_type_string)) {
+        const char *text = json_object_get_string(value);
+        if (text != NULL) {
+            char *end = NULL;
+            const unsigned long parsed = strtoul(text, &end, 10);
+            if (end != text) return (size_t)parsed;
+        }
+    }
+
+    return 0U;
+}
+
+static bool parse_json_prefix(const char *text,
+                              struct json_object **object,
+                              size_t *consumed)
+{
+    *object = NULL;
+    *consumed = 0U;
+
+    struct json_tokener *tokener = json_tokener_new();
+    if (tokener == NULL) return false;
+
+    struct json_object *parsed =
+        json_tokener_parse_ex(tokener, text, (int)strlen(text));
+    const enum json_tokener_error status = json_tokener_get_error(tokener);
+
+    /*
+     * json_tokener_parse_ex aceita texto extra após o primeiro JSON. O offset
+     * informa exatamente onde termina o primeiro objeto, inclusive quando título
+     * ou caminho contém espaços.
+     */
+    const size_t end = json_tokener_get_parse_end(tokener);
+    json_tokener_free(tokener);
+
+    if (parsed == NULL || status != json_tokener_success) {
+        if (parsed != NULL) json_object_put(parsed);
+        return false;
+    }
+
+    *object = parsed;
+    *consumed = end;
+    return true;
+}
+
+static void fill_track_identity(DldTrackLine *track, struct json_object *info)
+{
+    copy_json_string_field(info, "id", track->id, sizeof(track->id));
+    copy_json_string_field(info, "title", track->title, sizeof(track->title));
+    copy_json_string_field(info, "filepath", track->filepath, sizeof(track->filepath));
+    track->playlist_index = json_size_field(info, "playlist_index");
+    track->playlist_count = json_size_field(info, "playlist_count");
+}
+
+bool dld_parse_track_line(const char *line, DldTrackLine *track)
+{
+    if (track == NULL) return false;
+    memset(track, 0, sizeof(*track));
+    if (line == NULL) return false;
+
+    if (strncmp(line, "FILE ", 5U) == 0) {
+        struct json_object *info = json_tokener_parse(line + 5U);
+        if (info == NULL || !json_object_is_type(info, json_type_object)) {
+            if (info != NULL) json_object_put(info);
+            return false;
+        }
+
+        track->kind = DLD_TRACK_LINE_FILE;
+        fill_track_identity(track, info);
+        json_object_put(info);
+        return track->id[0] != '\0' || track->filepath[0] != '\0';
+    }
+
+    if (strncmp(line, "TRACK ", 6U) != 0) return false;
+
+    const char *payload = line + 6U;
+    struct json_object *info = NULL;
+    size_t consumed = 0U;
+    if (!parse_json_prefix(payload, &info, &consumed) ||
+        !json_object_is_type(info, json_type_object)) {
+        if (info != NULL) json_object_put(info);
+        return false;
+    }
+
+    const char *progress_text = payload + consumed;
+    while (*progress_text == ' ' || *progress_text == '\t') ++progress_text;
+
+    struct json_object *progress = json_tokener_parse(progress_text);
+    if (progress == NULL || !json_object_is_type(progress, json_type_object)) {
+        json_object_put(info);
+        if (progress != NULL) json_object_put(progress);
+        return false;
+    }
+
+    track->kind = DLD_TRACK_LINE_PROGRESS;
+    fill_track_identity(track, info);
+
+    struct json_object *percent = NULL;
+    if (json_object_object_get_ex(progress, "_percent_str", &percent) &&
+        percent != NULL) {
+        const char *text = json_object_get_string(percent);
+        if (text != NULL) {
+            char *end = NULL;
+            const double value = strtod(text, &end);
+            if (end != text) {
+                track->progress.has_percent = true;
+                track->progress.percent = value;
+            }
+        }
+    }
+
+    struct json_object *eta = NULL;
+    if (json_object_object_get_ex(progress, "eta", &eta) && eta != NULL &&
+        !json_object_is_type(eta, json_type_null)) {
+        const double value = json_object_get_double(eta);
+        if (value >= 0.0) {
+            track->progress.has_eta = true;
+            track->progress.eta_seconds = value;
+        }
+    }
+
+    copy_json_string_field(
+        progress,
+        "_speed_str",
+        track->progress.speed,
+        sizeof(track->progress.speed));
+
+    json_object_put(info);
+    json_object_put(progress);
+    return track->id[0] != '\0' || track->title[0] != '\0';
 }
 
 /* Centraliza a validação do JSON de opções para os getters simples abaixo. */
