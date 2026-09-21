@@ -1,6 +1,6 @@
 # Downloader
 
-Downloader de mídia para Linux escrito em **C17**, com interface **GTK4** e CLI.
+Downloader de mídia para Linux escrito em **C17**, com interface **GTK4** e CLI. O projeto separa extração, fila, conversão, validação e persistência para manter o fluxo previsível mesmo em downloads longos ou playlists.
 O aplicativo usa `yt-dlp` para extração/download e `ffmpeg`/`ffprobe` para
 conversão e validação. Esses programas são executados diretamente com
 `fork`/`exec`, nunca através de shell.
@@ -22,6 +22,23 @@ conversão e validação. Esses programas são executados diretamente com
 - índice `.downloader-library.json` para evitar downloads repetidos;
 - limite conservador persistente para YouTube: 5 s entre downloads e até 300
   inícios em uma janela móvel de 90 minutos, quando a proteção está ativada.
+
+## Arquitetura
+
+```text
+GTK4 / CLI
+   |
+   v
+fila de tarefas
+   |------> yt-dlp        (extração e download)
+   |------> ffmpeg        (conversão)
+   |------> ffprobe       (validação)
+   |
+   v
+SQLite + índice local de biblioteca
+```
+
+Os subprocessos são iniciados com `fork`/`exec`, sem passar URLs ou argumentos por um shell intermediário.
 
 ## Dependências de compilação
 
@@ -75,3 +92,14 @@ banco; somente a referência ao arquivo/perfil é persistida.
 A implementação principal está em [`c/`](c/). A arquitetura está documentada
 em [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) e o uso em
 [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md).
+
+
+## Uso responsável
+
+Use o Downloader apenas para conteúdo que você tenha permissão para baixar. Plataformas podem impor limites, autenticação, DRM ou termos próprios; o projeto não tenta contornar DRM.
+
+A proteção de ritmo para YouTube é conservadora e existe para reduzir rajadas de requisições, não para garantir ausência de bloqueios ou mudanças de política da plataforma.
+
+## Licença
+
+GNU General Public License v3.0. Consulte [LICENSE](LICENSE).
