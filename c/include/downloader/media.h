@@ -32,6 +32,11 @@ typedef struct {
     bool has_duration;
     bool is_playlist;
     size_t playlist_entries;
+
+    /* IDs de todos os itens da playlist, na ordem do array `entries`.
+     * Pertencem à struct e são liberados por dld_media_summary_clear. */
+    char **playlist_entry_ids;
+    size_t playlist_entry_count;
 } DldMediaSummary;
 
 typedef struct {

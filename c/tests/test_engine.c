@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -143,6 +144,84 @@ static void write_fake_ytdlp(const char *path, const char *fixture)
     assert(chmod(path, 0755) == 0);
 }
 
+/*
+ * Simula o yt-dlp com DUAS faixas válidas: ambos os arquivos são copiados para
+ * o staging e ambos os eventos FILE/TRACK são emitidos, terminando com código 0.
+ * Usado para verificar que um re-download parcial de playlist não gera cópias
+ * "(1)" dos itens já existentes (política de colisão padrão = renomeio).
+ */
+static void write_both_fake_ytdlp(const char *path, const char *fixture)
+{
+    FILE *script = fopen(path, "wb");
+    assert(script != NULL);
+
+    fputs("#!/bin/sh\n", script);
+    fputs("analysis=0\n", script);
+    fputs("for arg in \"$@\"; do\n", script);
+    fputs("  if [ \"$arg\" = \"-J\" ]; then analysis=1; fi\n", script);
+    fputs("done\n", script);
+
+    fputs("if [ \"$analysis\" = \"1\" ]; then\n", script);
+    fputs(
+        "  printf '%s\\n' "
+        "'{\"entries\":["
+        "{\"id\":\"id1\",\"title\":\"Faixa Um\"},"
+        "{\"id\":\"id2\",\"title\":\"Faixa Dois\"}"
+        "]}'\n",
+        script);
+    fputs("  exit 0\n", script);
+    fputs("fi\n", script);
+
+    fputs("output=''\n", script);
+    fputs("previous=''\n", script);
+    fputs("for arg in \"$@\"; do\n", script);
+    fputs("  if [ \"$previous\" = \"-o\" ]; then output=\"$arg\"; break; fi\n", script);
+    fputs("  previous=\"$arg\"\n", script);
+    fputs("done\n", script);
+    fputs("dir=${output%/*}\n", script);
+
+    fprintf(script, "cp '%s' \"$dir/Faixa Um [id1].wav\"\n", fixture);
+    fprintf(script, "cp '%s' \"$dir/Faixa Dois [id2].wav\"\n", fixture);
+
+    fputs(
+        "printf '%s\\n' 'POLICY_VIDEO id1'\n"
+        "printf '%s\\n' "
+        "'TRACK {\"id\":\"id1\",\"title\":\"Faixa Um\","
+        "\"playlist_index\":1,\"playlist_count\":2} "
+        "{\"_percent_str\":\"50.0%%\",\"_speed_str\":\"1.0MiB/s\","
+        "\"eta\":1,\"status\":\"downloading\"}' >&2\n",
+        script);
+    fputs(
+        "printf 'FILE "
+        "{\"id\":\"id1\",\"title\":\"Faixa Um\","
+        "\"playlist_index\":1,\"playlist_count\":2,"
+        "\"filepath\":\"%s/Faixa Um [id1].wav\"}\\n' "
+        "\"$dir\"\n",
+        script);
+
+    fputs(
+        "printf '%s\\n' 'POLICY_VIDEO id2'\n"
+        "printf '%s\\n' "
+        "'TRACK {\"id\":\"id2\",\"title\":\"Faixa Dois\","
+        "\"playlist_index\":2,\"playlist_count\":2} "
+        "{\"_percent_str\":\"75.0%%\",\"_speed_str\":\"1.0MiB/s\","
+        "\"eta\":1,\"status\":\"downloading\"}' >&2\n",
+        script);
+    fputs(
+        "printf 'FILE "
+        "{\"id\":\"id2\",\"title\":\"Faixa Dois\","
+        "\"playlist_index\":2,\"playlist_count\":2,"
+        "\"filepath\":\"%s/Faixa Dois [id2].wav\"}\\n' "
+        "\"$dir\"\n",
+        script);
+
+    fputs("printf '%s\\n' 'item id2 concluída' >&2\n", script);
+    fputs("exit 0\n", script);
+
+    assert(fclose(script) == 0);
+    assert(chmod(path, 0755) == 0);
+}
+
 static void capture_event(const DldEngineEvent *event, void *userdata)
 {
     EventStats *stats = userdata;
@@ -263,6 +342,79 @@ static void test_partial_playlist(DldEngine *engine,
     dld_task_record_clear(&task);
 }
 
+/*
+ * Re-download parcial de playlist: após o primeiro download as duas faixas
+ * existem; apaga-se uma do disco (mantendo-a no índice) e re-executa a mesma
+ * playlist. A faixa existente deve ser pulada por entrada — sem gerar cópia
+ * "(1)" com a política de renomeio padrão — e apenas a apagada é restaurada.
+ */
+static void test_playlist_redownload_no_duplicates(
+    DldEngine *engine, const char *output, DldAppError *error)
+{
+    static const char *options =
+        "{\"playlist\":true,\"media_kind\":\"video+audio\","
+        "\"output_format\":\"auto\",\"bitrate\":\"auto\",\"max_height\":0}";
+
+    /* Primeiro download: ambas as faixas são válidas e ficam no destino. */
+    DldTaskRecord task;
+    dld_task_record_init(&task);
+    task.id = dld_string_duplicate("playlist-redownload");
+    task.kind = DLD_TASK_DOWNLOAD;
+    task.input_url = dld_string_duplicate(
+        "https://www.youtube.com/playlist?list=test");
+    task.options_json = dld_string_duplicate(options);
+    task.collision = DLD_COLLISION_RENAME;
+
+    EventStats stats = {0};
+    atomic_bool cancel = false;
+    assert(dld_engine_execute_task(engine, &task, &cancel, capture_event, &stats, error));
+    dld_app_error_clear(error);
+    dld_task_record_clear(&task);
+
+    char f1[768];
+    char f2[768];
+    (void)snprintf(f1, sizeof(f1), "%s/Faixa Um [id1].wav", output);
+    (void)snprintf(f2, sizeof(f2), "%s/Faixa Dois [id2].wav", output);
+    assert(access(f1, F_OK) == 0);
+    assert(access(f2, F_OK) == 0);
+
+    /* Apaga uma faixa do disco mas mantém o registro no índice. No re-download
+     * ela deve ser restaurada pelo nome original — sem cópia "(1)". */
+    assert(unlink(f2) == 0);
+
+    dld_task_record_init(&task);
+    task.id = dld_string_duplicate("playlist-redownload");
+    task.kind = DLD_TASK_DOWNLOAD;
+    task.input_url = dld_string_duplicate(
+        "https://www.youtube.com/playlist?list=test");
+    task.options_json = dld_string_duplicate(options);
+    task.collision = DLD_COLLISION_RENAME;
+
+    EventStats stats2 = {0};
+    atomic_bool cancel2 = false;
+    assert(dld_engine_execute_task(engine, &task, &cancel2, capture_event, &stats2, error));
+    dld_app_error_clear(error);
+    dld_task_record_clear(&task);
+
+    /* Ambas as faixas devem estar presentes novamente. */
+    assert(access(f1, F_OK) == 0);
+    assert(access(f2, F_OK) == 0);
+
+    /* Nenhum arquivo de mídia pode ser uma cópia "(1)". */
+    DIR *dir = opendir(output);
+    assert(dir != NULL);
+    struct dirent *entry;
+    int duplicates = 0;
+    fputs("DEBUG listing: ", stderr);
+    while ((entry = readdir(dir)) != NULL) {
+        if (strstr(entry->d_name, " (1)") != NULL) ++duplicates;
+        fputc('\n', stderr);
+        fputs(entry->d_name, stderr);
+    }
+    closedir(dir);
+    assert(duplicates == 0);
+}
+
 static void cleanup_test_tree(const char *root,
                               const char *data,
                               const char *output,
@@ -343,6 +495,13 @@ int main(void)
     dld_app_error_clear(&error);
 
     test_partial_playlist(&engine, output, &error);
+    dld_app_error_clear(&error);
+
+    /* Reescreve o fake para duas faixas válidas; a partir daqui os testes usam
+     * esse comportamento. */
+    write_both_fake_ytdlp(fake_ytdlp, input);
+
+    test_playlist_redownload_no_duplicates(&engine, output, &error);
     dld_app_error_clear(&error);
 
     dld_engine_clear(&engine);

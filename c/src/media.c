@@ -47,6 +47,10 @@ void dld_media_summary_clear(DldMediaSummary *summary)
     free(summary->id);
     free(summary->title);
     free(summary->uploader);
+    for (size_t i = 0U; i < summary->playlist_entry_count; ++i) {
+        free(summary->playlist_entry_ids[i]);
+    }
+    free(summary->playlist_entry_ids);
     dld_media_summary_init(summary);
 }
 
@@ -484,6 +488,28 @@ bool dld_parse_ytdlp_summary(const char *json_text, DldMediaSummary *summary,
         summary->is_playlist = true;
         summary->playlist_entries = json_object_array_length(entries);
         if (summary->playlist_entries > 0U) object = json_object_array_get_idx(entries, 0U);
+
+        /* Coleta os IDs de todos os itens para deduplicação por entrada. */
+        {
+            char **ids = NULL;
+            size_t count = 0U;
+            size_t cap = 0U;
+            for (size_t i = 0U; i < summary->playlist_entries; ++i) {
+                struct json_object *entry = json_object_array_get_idx(entries, i);
+                if (entry == NULL || !json_object_is_type(entry, json_type_object)) continue;
+                char *id = json_string_copy(entry, "id");
+                if (id == NULL) continue;
+                if (count == cap) {
+                    cap = count + 16U;
+                    char **grown = realloc(ids, cap * sizeof(*grown));
+                    if (grown == NULL) { free(id); break; }
+                    ids = grown;
+                }
+                ids[count++] = id;
+            }
+            summary->playlist_entry_ids = ids;
+            summary->playlist_entry_count = count;
+        }
     }
     if (object != NULL && json_object_is_type(object, json_type_object)) {
         summary->id = json_string_copy(object, "id");

@@ -390,6 +390,7 @@ typedef struct {
      */
     const char *destination_dir;
     const char *format;
+    bool is_playlist;
     size_t published;
     size_t failed_items;
     char *last_path;
@@ -478,6 +479,37 @@ static bool publish_finished_track(ProgressContext *context,
         goto fail;
     }
     dld_probe_summary_clear(&probe);
+
+    /*
+     * Deduplicação por entrada em playlists. Se esta faixa já está no índice e
+     * ainda existe em disco, pulamos a publicação incremental para não gerar
+     * cópias "(1)" com a política de renomeio padrão. Só vale para playlists:
+     * mídia única é deduplicada antes do download (execute_download).
+     */
+    if (context->is_playlist && track->id[0] != '\0') {
+        char *existing = NULL;
+        int found = dld_library_find(
+            context->destination_dir,
+            track->id,
+            context->format,
+            &existing,
+            &item_error);
+        if (found) {
+            emit_event(
+                context->callback,
+                context->userdata,
+                event_id,
+                DLD_STATUS_COMPLETED,
+                true,
+                100.0,
+                NULL,
+                "Já existe — faixa pulada",
+                existing);
+            dld_app_error_clear(&item_error);
+            free(existing);
+            return true;
+        }
+    }
 
     const char *filename = basename_ptr(track->filepath);
     if (filename == NULL || *filename == '\0') {
@@ -687,6 +719,36 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
         goto fail;
     }
 
+    if (summary.is_playlist && summary.playlist_entry_count > 0U) {
+        DldProbeSummary probe;
+        dld_probe_summary_init(&probe);
+        char *first_existing = NULL;
+        size_t remaining = summary.playlist_entry_count;
+        for (size_t i = 0U; i < summary.playlist_entry_count; ++i) {
+            char *existing = NULL;
+            if (!dld_library_find(destination_dir, summary.playlist_entry_ids[i], format, &existing, error)) continue;
+            if (probe_file(engine, existing, &probe, error)) {
+                if (first_existing == NULL) first_existing = existing;
+                --remaining;
+            } else {
+                dld_app_error_clear(error);
+            }
+        }
+        dld_probe_summary_clear(&probe);
+
+        if (remaining == 0U && first_existing != NULL) {
+            (void)set_task_destination(task, first_existing);
+            emit(callback, userdata, task, true, 100.0, NULL,
+                 "Playlist completa — todos os itens já existem", first_existing);
+            free(first_existing);
+            dld_media_summary_clear(&summary);
+            free(format);
+            free(kind);
+            free(bitrate);
+            return true;
+        }
+    }
+
     if (!playlist && summary.id != NULL) {
         char *existing = NULL;
         if (dld_library_find(destination_dir, summary.id, format, &existing, error)) {
@@ -802,6 +864,7 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
         .callback = callback,
         .userdata = userdata,
         .account_youtube_starts = youtube_limited,
+        .is_playlist = playlist,
         .destination_dir = destination_dir,
         .format = format,
         .published = 0U,
@@ -952,6 +1015,37 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
             continue;
         }
 
+        /*
+         * Deduplicação por entrada em playlists. Se esta faixa já está no índice
+         * (e ainda existe em disco), pulamos a publicação para não gerar cópias
+         * "(1)" com a política de renomeio padrão. Só vale para playlists: mídia
+         * única já é deduplicada antes do download.
+         */
+        if (playlist && media_id != NULL) {
+            char *existing = NULL;
+            int found = dld_library_find(destination_dir, media_id, format, &existing, error);
+            if (found) {
+                dld_app_error_clear(error);
+                free(existing);
+                emit_event(
+                    callback,
+                    userdata,
+                    child_id != NULL ? child_id : task->id,
+                    DLD_STATUS_COMPLETED,
+                    true,
+                    100.0,
+                    NULL,
+                    "Já existe — faixa pulada",
+                    existing);
+                free(destination);
+                free(display_name);
+                free(child_id);
+                free(media_id);
+                free(source);
+                goto playlist_item_done;
+            }
+        }
+
         DldPublishedOutput output;
         dld_published_output_init(&output);
 
@@ -1030,7 +1124,37 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
         free(source);
     }
 
+    playlist_item_done:
     closedir(directory);
+    /*
+     * Rede de segurança contra a perda de registro quando os eventos FILE do
+     * yt-dlp não disparam (versão antiga ou saída inesperada). Varre o destino
+     * final e registra cada arquivo publicado pelo ID extraído do nome — que é
+     * exatamente a chave usada na consulta de deduplicação.
+     */
+    {
+        DIR *published_dir = opendir(destination_dir);
+        if (published_dir != NULL) {
+            struct dirent *pentry;
+            while ((pentry = readdir(published_dir)) != NULL) {
+                char *name = dld_string_duplicate(pentry->d_name);
+                if (name == NULL) break;
+                if (name[0] == '.' || is_auxiliary_download_file(name)) { free(name); continue; }
+                char *candidate = path_join(destination_dir, name);
+                if (candidate == NULL) { free(name); continue; }
+                if (!regular_file(candidate)) { free(name); free(candidate); continue; }
+                char *pid = extract_id_from_filename(name);
+                if (pid != NULL && format != NULL) {
+                    (void)dld_library_record(destination_dir, pid, format, candidate, error);
+                    dld_app_error_clear(error);
+                }
+                free(pid);
+                free(name);
+                free(candidate);
+            }
+            closedir(published_dir);
+        }
+    }
     (void)rmdir(tmp_dir);
     free(tmp_dir);
     dld_media_summary_clear(&summary);
