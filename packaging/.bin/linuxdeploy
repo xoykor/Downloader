@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# One-shot shim: disable AppImageKit's bundled (old) strip that cannot parse SHT_RELR.
+# AppImageKit copies its own binutils 2.35 strip into the extracted tree and uses it,
+# which chokes on .relr.dyn sections emitted by glibc 2.44/binutils 2.47 toolchains.
+set -euo pipefail
+real="/home/x/.local/bin/linuxdeploy-x86_64.AppImage"
+[[ -x "$real" ]] || real="$(command -v linuxdeploy)"
+args=("$@")
+out=-1
+for ((i=0; i<${#args[@]}; i++)); do
+  if [[ "${args[i]}" == "--output" ]]; then out=$i; break; fi
+done
+if (( out >= 0 )); then
+  new=()
+  for ((i=0; i<out; i++)); do new+=("${args[i]}"); done
+  new+=(--strip no)
+  new+=("${args[@]:out}")
+  args=("${new[@]}")
+fi
+exec "$real" "${args[@]}"

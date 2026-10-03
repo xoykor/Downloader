@@ -44,7 +44,11 @@ copy_helper yt-dlp "${YTDLP_BINARY:-}"
 copy_helper ffmpeg "${FFMPEG_BINARY:-}"
 copy_helper ffprobe "${FFPROBE_BINARY:-}"
 
-linuxdeploy="${LINUXDEPLOY:-$(command -v linuxdeploy || true)}"
+# Usa o shim local (packaging/.bin/linuxdeploy), que injeta --strip no após
+# --output. O linuxdeploy padrão do PATH é um AppImage com binutils 2.35 cujo
+# strip não consegue ler seções .relr.dyn (SHT_RELR=0x13) emitidas por
+# glibc 2.44/binutils 2.47, abortando a empacotagem.
+linuxdeploy="${LINUXDEPLOY:-$project_dir/packaging/.bin/linuxdeploy}"
 appimagetool="${APPIMAGETOOL:-$(command -v appimagetool || true)}"
 if [[ -z "$linuxdeploy" || -z "$appimagetool" ]]; then
   echo "linuxdeploy e appimagetool são necessários para criar o AppImage." >&2
@@ -53,6 +57,31 @@ fi
 chmod +x "$linuxdeploy" "$appimagetool"
 export APPIMAGETOOL="$appimagetool"
 export APPIMAGE_EXTRACT_AND_RUN=1
+
+# AppImageKit's bundled binutils 2.35 strip cannot parse SHT_RELR (.relr.dyn)
+# sections emitted by the glibc 2.44/binutils 2.47 toolchain, aborting packaging
+# on any collected library that carries them (GTK4/glib/cairo/pango here). No
+# newer linuxdeploy is available and this build has no --strip flag to disable it.
+# Modern /usr/bin/strip handles .relr.dyn fine, so we ship already-stripped copies
+# of every shared library our executables depend on into the AppDir; linuxdeploy
+# then finds them present and never re-copies the relr-bearing originals from the
+# system. Host filesystem is left untouched.
+prestrip_libs() {
+  local exe src base dst
+  for exe in "$cmake_dir/downloader-desktop" "$cmake_dir/downloader-cli"; do
+    [[ -f "$exe" ]] || continue
+    while IFS= read -r src; do
+      [[ -z "$src" ]] && continue
+      base="$(basename -- "$src")"
+      dst="$appdir/usr/lib/$base"
+      if [[ ! -e "$dst" ]]; then
+        cp -P "$src" "$dst" 2>/dev/null || continue
+        /usr/bin/strip "$dst" 2>/dev/null || true
+      fi
+    done < <(ldd -- "$exe" 2>/dev/null | awk '/=>/{print $1}')
+  done
+}
+prestrip_libs
 
 (
   cd "$output_dir"
