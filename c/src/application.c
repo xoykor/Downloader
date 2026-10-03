@@ -295,8 +295,8 @@ bool dld_application_retry(DldApplicationState *state, const char *id,
     }
     DldTaskRecord *task = &state->tasks[index];
     if (task->status != DLD_STATUS_FAILED && task->status != DLD_STATUS_CANCELLED &&
-        task->status != DLD_STATUS_INTERRUPTED) {
-        set_internal_error(error, "Só tarefas falhas, canceladas ou interrompidas podem ser repetidas.", "fila");
+        task->status != DLD_STATUS_INTERRUPTED && task->status != DLD_STATUS_PARTIAL) {
+        set_internal_error(error, "Só tarefas parciais, falhas, canceladas ou interrompidas podem ser repetidas.", "fila");
         return false;
     }
     if (!push_pending(state, index)) {
@@ -352,7 +352,7 @@ bool dld_application_finish(DldApplicationState *state, const char *id,
                             DldTaskEvent *event, DldAppError *error)
 {
     if (final_status != DLD_STATUS_COMPLETED && final_status != DLD_STATUS_FAILED &&
-        final_status != DLD_STATUS_CANCELLED) {
+        final_status != DLD_STATUS_CANCELLED && final_status != DLD_STATUS_PARTIAL) {
         set_internal_error(error, "Estado final inválido.", "fila");
         return false;
     }

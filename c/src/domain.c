@@ -26,7 +26,7 @@ char *dld_string_duplicate(const char *text)
 bool dld_task_status_is_terminal(DldTaskStatus status)
 {
     return status == DLD_STATUS_COMPLETED || status == DLD_STATUS_FAILED ||
-           status == DLD_STATUS_CANCELLED;
+           status == DLD_STATUS_CANCELLED || status == DLD_STATUS_PARTIAL;
 }
 
 bool dld_task_status_is_active(DldTaskStatus status)
@@ -67,15 +67,15 @@ const char *dld_task_status_name(DldTaskStatus status)
     static const char *names[] = {
         "na_fila", "analisando", "aguardando_autenticacao", "baixando",
         "unindo", "convertendo", "validando", "concluido", "falhou",
-        "cancelado", "interrompido"
+        "cancelado", "interrompido", "parcial"
     };
-    return (unsigned)status < 11U ? names[(unsigned)status] : "desconhecido";
+    return (unsigned)status < 12U ? names[(unsigned)status] : "desconhecido";
 }
 
 bool dld_task_status_from_name(const char *name, DldTaskStatus *status)
 {
     if (name == NULL || status == NULL) return false;
-    for (unsigned i = 0; i < 11U; ++i) {
+    for (unsigned i = 0; i < 12U; ++i) {
         if (strcmp(name, dld_task_status_name((DldTaskStatus)i)) == 0) {
             *status = (DldTaskStatus)i;
             return true;

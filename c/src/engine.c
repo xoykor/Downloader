@@ -393,6 +393,10 @@ typedef struct {
     bool is_playlist;
     size_t published;
     size_t failed_items;
+    size_t playlist_total;
+    size_t playlist_resolved;
+    size_t playlist_successful;
+    unsigned char *playlist_item_state;
     char *last_path;
 } ProgressContext;
 
@@ -432,7 +436,7 @@ static void track_display_message(const DldTrackLine *track,
         (void)snprintf(
             buffer,
             buffer_size,
-            "%zu/%zu · %s",
+            "Item %zu/%zu · %s",
             track->playlist_index,
             track->playlist_count,
             title);
@@ -441,12 +445,57 @@ static void track_display_message(const DldTrackLine *track,
     }
 }
 
+/* Count each playlist position once, separately from the current item index. */
+static void mark_playlist_item(ProgressContext *context,
+                               size_t playlist_index,
+                               bool successful)
+{
+    if (context == NULL || !context->is_playlist || context->playlist_total == 0U ||
+        context->playlist_item_state == NULL) return;
+
+    size_t index = playlist_index;
+    if (index == 0U || index > context->playlist_total) {
+        index = 1U;
+        while (index <= context->playlist_total && context->playlist_item_state[index] != 0U) {
+            ++index;
+        }
+        if (index > context->playlist_total) return;
+    }
+
+    const unsigned char old_state = context->playlist_item_state[index];
+    if (old_state == 1U || old_state == (successful ? 1U : 2U)) return;
+    if (old_state == 0U) ++context->playlist_resolved;
+    if (old_state == 2U && successful && context->failed_items > 0U) {
+        --context->failed_items;
+    }
+
+    context->playlist_item_state[index] = successful ? 1U : 2U;
+    if (successful) ++context->playlist_successful;
+    else ++context->failed_items;
+
+    char message[256];
+    (void)snprintf(message, sizeof(message),
+                   "Playlist: %zu/%zu itens com saída válida · %zu falhas locais",
+                   context->playlist_successful, context->playlist_total,
+                   context->failed_items);
+    const double progress =
+        (100.0 * (double)context->playlist_successful) / (double)context->playlist_total;
+    emit_event(context->callback, context->userdata,
+               context->task != NULL ? context->task->id : NULL,
+               DLD_STATUS_DOWNLOADING, true, progress, NULL,
+               message, context->destination_dir);
+}
+
 static bool publish_finished_track(ProgressContext *context,
                                   const DldTrackLine *track,
                                   const char *event_id,
                                   const char *message)
 {
     if (track->filepath[0] == '\0' || !regular_file(track->filepath)) {
+        mark_playlist_item(context, track->playlist_index, false);
+        emit_event(context->callback, context->userdata, event_id,
+                   DLD_STATUS_FAILED, false, 0.0, NULL,
+                   "yt-dlp não produziu o arquivo desta faixa.", NULL);
         return false;
     }
 
@@ -495,6 +544,7 @@ static bool publish_finished_track(ProgressContext *context,
             &existing,
             &item_error);
         if (found) {
+            mark_playlist_item(context, track->playlist_index, true);
             emit_event(
                 context->callback,
                 context->userdata,
@@ -565,6 +615,7 @@ static bool publish_finished_track(ProgressContext *context,
     free(context->last_path);
     context->last_path = dld_string_duplicate(output.path);
     ++context->published;
+    mark_playlist_item(context, track->playlist_index, true);
 
     emit_event(
         context->callback,
@@ -586,7 +637,6 @@ fail:
     dld_probe_summary_clear(&probe);
 
 fail_without_probe:
-    ++context->failed_items;
     emit_event(
         context->callback,
         context->userdata,
@@ -680,6 +730,7 @@ static bool set_task_destination(DldTaskRecord *task, const char *path)
 static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool *cancel_flag,
                              DldEngineEventCallback callback, void *userdata, DldAppError *error)
 {
+    ProgressContext progress_context = {0};
     if (task->input_url == NULL) {
         (void)dld_app_error_set(error, DLD_ERROR_INVALID_URL, "Tarefa sem URL.", "download", false, 0);
         return false;
@@ -736,7 +787,8 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
         }
         dld_probe_summary_clear(&probe);
 
-        if (remaining == 0U && first_existing != NULL) {
+        if (remaining == 0U && first_existing != NULL &&
+            summary.playlist_entry_count == summary.playlist_entries) {
             (void)set_task_destination(task, first_existing);
             emit(callback, userdata, task, true, 100.0, NULL,
                  "Playlist completa — todos os itens já existem", first_existing);
@@ -858,7 +910,7 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
         &command,
         error);
 
-    ProgressContext progress_context = {
+    progress_context = (ProgressContext){
         .engine = engine,
         .task = task,
         .callback = callback,
@@ -867,10 +919,31 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
         .is_playlist = playlist,
         .destination_dir = destination_dir,
         .format = format,
+        .playlist_total = summary.is_playlist ? summary.playlist_entries : 0U,
         .published = 0U,
         .failed_items = 0U,
         .last_path = NULL,
     };
+    if (progress_context.playlist_total > 0U) {
+        progress_context.playlist_item_state =
+            calloc(progress_context.playlist_total + 1U, sizeof(*progress_context.playlist_item_state));
+        if (progress_context.playlist_item_state == NULL) {
+            (void)dld_app_error_set(error, DLD_ERROR_INTERNAL,
+                                    "Memória insuficiente para acompanhar os itens da playlist.",
+                                    "download", false, 0);
+            dld_command_clear(&command);
+            dld_process_result_clear(&result);
+            free(template_path);
+            dld_media_summary_clear(&summary);
+            free(tmp_dir);
+            goto fail;
+        }
+        char message[160];
+        (void)snprintf(message, sizeof(message), "Playlist: 0/%zu itens com saída válida",
+                       progress_context.playlist_total);
+        emit_event(callback, userdata, task->id, DLD_STATUS_DOWNLOADING,
+                   true, 0.0, NULL, message, destination_dir);
+    }
 
     if (ok) {
         ok = run_command(
@@ -909,6 +982,7 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
 
     if (!ok) {
         free(progress_context.last_path);
+        progress_context.last_path = NULL;
         free(process_error);
         dld_media_summary_clear(&summary);
         free(tmp_dir);
@@ -936,7 +1010,6 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
      * emitirem o evento after_move esperado.
      */
     size_t published = progress_context.published;
-    size_t failed_items = progress_context.failed_items;
     char *last_path = progress_context.last_path;
     progress_context.last_path = NULL;
     struct dirent *entry;
@@ -954,7 +1027,8 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
         }
 
         char *media_id = extract_id_from_filename(entry->d_name);
-        char *child_id = track_event_id(task, media_id, published + failed_items + 1U);
+        char *child_id = track_event_id(
+            task, media_id, published + progress_context.failed_items + 1U);
         char *display_name = stem_copy(entry->d_name);
 
         if (display_name != NULL && media_id != NULL) {
@@ -974,6 +1048,7 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
             dld_probe_summary_clear(&probe);
 
             if (playlist) {
+                mark_playlist_item(&progress_context, 0U, false);
                 emit_event(
                     callback,
                     userdata,
@@ -984,7 +1059,6 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
                     NULL,
                     display_name != NULL ? display_name : "Faixa inválida",
                     NULL);
-                ++failed_items;
                 dld_app_error_clear(error);
                 free(display_name);
                 free(child_id);
@@ -1026,7 +1100,7 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
             int found = dld_library_find(destination_dir, media_id, format, &existing, error);
             if (found) {
                 dld_app_error_clear(error);
-                free(existing);
+                mark_playlist_item(&progress_context, 0U, true);
                 emit_event(
                     callback,
                     userdata,
@@ -1037,6 +1111,7 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
                     NULL,
                     "Já existe — faixa pulada",
                     existing);
+                free(existing);
                 free(destination);
                 free(display_name);
                 free(child_id);
@@ -1058,6 +1133,7 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
             dld_published_output_clear(&output);
 
             if (playlist) {
+                mark_playlist_item(&progress_context, 0U, false);
                 emit_event(
                     callback,
                     userdata,
@@ -1068,7 +1144,6 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
                     NULL,
                     display_name != NULL ? display_name : "Falha ao publicar faixa",
                     NULL);
-                ++failed_items;
                 dld_app_error_clear(error);
                 free(destination);
                 free(display_name);
@@ -1104,6 +1179,8 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
         free(last_path);
         last_path = dld_string_duplicate(output.path);
         ++published;
+        if (playlist) mark_playlist_item(&progress_context, 0U, true);
+        progress_context.published = published;
 
         emit_event(
             callback,
@@ -1159,7 +1236,8 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
     free(tmp_dir);
     dld_media_summary_clear(&summary);
 
-    if (published == 0U) {
+    if ((!playlist && published == 0U) ||
+        (playlist && progress_context.playlist_successful == 0U && published == 0U)) {
         free(last_path);
 
         if (process_exit_code != 0 && process_error != NULL) {
@@ -1184,16 +1262,30 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
         goto fail;
     }
 
-    if (playlist && (failed_items > 0U || process_exit_code != 0)) {
-        emit(
-            callback,
-            userdata,
-            task,
-            false,
-            0.0,
-            NULL,
-            "Playlist concluída parcialmente; itens disponíveis foram salvos.",
-            destination_dir);
+    if (playlist && progress_context.playlist_total > 0U) {
+        const size_t unresolved = progress_context.playlist_total - progress_context.playlist_resolved;
+        const bool partial =
+            progress_context.playlist_successful < progress_context.playlist_total ||
+            progress_context.failed_items > 0U || process_exit_code != 0;
+        if (partial) {
+            char message[320];
+            (void)snprintf(
+                message, sizeof(message),
+                "Playlist parcial: %zu/%zu itens com saída válida; %zu falhas locais; %zu sem resultado registrado%s",
+                progress_context.playlist_successful,
+                progress_context.playlist_total,
+                progress_context.failed_items,
+                unresolved,
+                process_exit_code != 0 ? " (yt-dlp reportou erro)" : "");
+            (void)dld_app_error_set(
+                error,
+                process_exit_code != 0 ? DLD_ERROR_NETWORK : DLD_ERROR_INVALID_MEDIA,
+                message,
+                "download",
+                process_exit_code != 0,
+                process_exit_code);
+            task->status = DLD_STATUS_PARTIAL;
+        }
     }
 
     if (!playlist && last_path != NULL) {
@@ -1202,6 +1294,8 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
 
     free(process_error);
     free(last_path);
+    free(progress_context.playlist_item_state);
+    progress_context.playlist_item_state = NULL;
     free(format);
     free(kind);
     free(bitrate);
@@ -1210,6 +1304,8 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
 oom:
     (void)dld_app_error_set(error, DLD_ERROR_INTERNAL, "Memória insuficiente.", "download", false, 0);
 fail:
+    free(progress_context.last_path);
+    free(progress_context.playlist_item_state);
     free(format);
     free(kind);
     free(bitrate);
@@ -1461,7 +1557,13 @@ bool dld_engine_execute_task(DldEngine *engine, DldTaskRecord *task,
         break;
     }
 
-    if (ok) {
+    if (ok && task->status == DLD_STATUS_PARTIAL) {
+        task->has_error = error != NULL && error->message != NULL;
+        if (task->has_error) (void)dld_app_error_copy(&task->error, error);
+        emit(callback, userdata, task, false, 0.0, NULL,
+             error != NULL && error->message != NULL ? error->message : "Playlist concluída parcialmente",
+             task->destination);
+    } else if (ok) {
         task->status = DLD_STATUS_COMPLETED;
         task->has_error = false;
         dld_app_error_clear(&task->error);

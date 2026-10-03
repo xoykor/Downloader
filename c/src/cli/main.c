@@ -211,9 +211,14 @@ static int command_download(DldEngine *engine, int argc, char **argv)
     atomic_bool cancelled = false;
     const bool ok = dld_engine_execute_task(engine, &task, &cancelled, print_event, NULL, &error);
     if (!ok) print_error(&error);
+    else if (task.status == DLD_STATUS_PARTIAL) {
+        fprintf(stderr, "aviso: %s\n", error.message != NULL ? error.message : "Playlist parcial.");
+    }
+    const int exit_code = !ok ? EXIT_FAILURE :
+                          task.status == DLD_STATUS_PARTIAL ? 2 : EXIT_SUCCESS;
     dld_task_record_clear(&task);
     dld_app_error_clear(&error);
-    return ok ? EXIT_SUCCESS : EXIT_FAILURE;
+    return exit_code;
 }
 
 static int command_convert(DldEngine *engine, int argc, char **argv)

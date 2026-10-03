@@ -185,6 +185,7 @@ static const char *status_label(DldTaskStatus status)
     case DLD_STATUS_CONVERTING: return "Convertendo";
     case DLD_STATUS_VALIDATING: return "Validando";
     case DLD_STATUS_COMPLETED: return "Concluído";
+    case DLD_STATUS_PARTIAL: return "Concluído parcialmente";
     case DLD_STATUS_FAILED: return "Falhou";
     case DLD_STATUS_CANCELLED: return "Cancelado";
     case DLD_STATUS_INTERRUPTED: return "Interrompido";
@@ -198,7 +199,8 @@ static gboolean status_is_terminal(DldTaskStatus status)
 {
     return status == DLD_STATUS_COMPLETED ||
            status == DLD_STATUS_FAILED ||
-           status == DLD_STATUS_CANCELLED;
+           status == DLD_STATUS_CANCELLED ||
+           status == DLD_STATUS_PARTIAL;
 }
 
 static char *parent_task_id_copy(const char *task_id)
