@@ -396,6 +396,7 @@ typedef struct {
     size_t playlist_total;
     size_t playlist_resolved;
     size_t playlist_successful;
+    size_t last_playlist_index;
     unsigned char *playlist_item_state;
     char *last_path;
 } ProgressContext;
@@ -505,6 +506,9 @@ static void mark_playlist_item(ProgressContext *context,
     context->playlist_item_state[index] = successful ? 1U : 2U;
     if (successful) ++context->playlist_successful;
     else ++context->failed_items;
+    if (successful && index > context->last_playlist_index) {
+        context->last_playlist_index = index;
+    }
 
     char message[256];
     (void)snprintf(message, sizeof(message),
@@ -517,6 +521,64 @@ static void mark_playlist_item(ProgressContext *context,
                context->task != NULL ? context->task->id : NULL,
                DLD_STATUS_DOWNLOADING, true, progress, NULL,
                message, context->destination_dir);
+}
+
+/* Build compact --playlist-items ranges for pending positions at/after start. */
+static char *build_playlist_items(const ProgressContext *context,
+                                  size_t start_index,
+                                  DldAppError *error)
+{
+    if (context == NULL || context->playlist_total == 0U ||
+        context->playlist_item_state == NULL) {
+        return dld_string_duplicate("");
+    }
+    if (context->playlist_total > (SIZE_MAX - 1U) / 24U) {
+        (void)dld_app_error_set(error, DLD_ERROR_INTERNAL,
+                                "Playlist grande demais para planejar a retomada.",
+                                "download", false, 0);
+        return NULL;
+    }
+
+    const size_t capacity = context->playlist_total * 24U + 1U;
+    char *items = malloc(capacity);
+    if (items == NULL) {
+        (void)dld_app_error_set(error, DLD_ERROR_INTERNAL,
+                                "Memória insuficiente para planejar a retomada.",
+                                "download", false, 0);
+        return NULL;
+    }
+    items[0] = '\0';
+
+    size_t used = 0U;
+    size_t index = start_index > 0U ? start_index : 1U;
+    while (index <= context->playlist_total) {
+        if (context->playlist_item_state[index] != 0U) {
+            ++index;
+            continue;
+        }
+
+        const size_t first = index;
+        while (index < context->playlist_total &&
+               context->playlist_item_state[index + 1U] == 0U) {
+            ++index;
+        }
+        const size_t last = index;
+        const int written = last > first
+            ? snprintf(items + used, capacity - used, "%s%zu-%zu",
+                       used > 0U ? "," : "", first, last)
+            : snprintf(items + used, capacity - used, "%s%zu",
+                       used > 0U ? "," : "", first);
+        if (written < 0 || (size_t)written >= capacity - used) {
+            free(items);
+            (void)dld_app_error_set(error, DLD_ERROR_INTERNAL,
+                                    "Falha ao montar a lista de retomada.",
+                                    "download", false, 0);
+            return NULL;
+        }
+        used += (size_t)written;
+        ++index;
+    }
+    return items;
 }
 
 static bool publish_finished_track(ProgressContext *context,
@@ -710,7 +772,6 @@ static void download_progress_line(const char *line, void *userdata)
 
     DldTrackLine track;
     if (!dld_parse_track_line(line, &track)) return;
-
     char *event_id = track_event_id(
         context->task,
         track.id,
@@ -803,6 +864,30 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
         goto fail;
     }
 
+    progress_context = (ProgressContext){
+        .engine = engine,
+        .task = task,
+        .callback = callback,
+        .userdata = userdata,
+        .account_youtube_starts = false,
+        .is_playlist = summary.is_playlist,
+        .destination_dir = destination_dir,
+        .format = format,
+        .playlist_total = summary.is_playlist ? summary.playlist_entries : 0U,
+    };
+    if (progress_context.playlist_total > 0U) {
+        progress_context.playlist_item_state =
+            calloc(progress_context.playlist_total + 1U,
+                   sizeof(*progress_context.playlist_item_state));
+        if (progress_context.playlist_item_state == NULL) {
+            (void)dld_app_error_set(error, DLD_ERROR_INTERNAL,
+                                    "Memória insuficiente para acompanhar a playlist.",
+                                    "download", false, 0);
+            dld_media_summary_clear(&summary);
+            goto fail;
+        }
+    }
+
     if (summary.is_playlist && summary.playlist_entry_count > 0U) {
         DldProbeSummary probe;
         dld_probe_summary_init(&probe);
@@ -813,9 +898,18 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
             if (!dld_library_find(destination_dir, summary.playlist_entry_ids[i], format, &existing, error)) continue;
             if (probe_file(engine, existing, &probe, error)) {
                 if (first_existing == NULL) first_existing = existing;
+                else free(existing);
                 --remaining;
+                const size_t position = summary.playlist_entry_indexes[i];
+                if (position > 0U && position <= progress_context.playlist_total &&
+                    progress_context.playlist_item_state[position] == 0U) {
+                    progress_context.playlist_item_state[position] = 1U;
+                    ++progress_context.playlist_resolved;
+                    ++progress_context.playlist_successful;
+                }
             } else {
                 dld_app_error_clear(error);
+                free(existing);
             }
         }
         dld_probe_summary_clear(&probe);
@@ -826,12 +920,15 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
             emit(callback, userdata, task, true, 100.0, NULL,
                  "Playlist completa — todos os itens já existem", first_existing);
             free(first_existing);
+            free(progress_context.playlist_item_state);
+            progress_context.playlist_item_state = NULL;
             dld_media_summary_clear(&summary);
             free(format);
             free(kind);
             free(bitrate);
             return true;
         }
+        free(first_existing);
     }
 
     if (!playlist && summary.id != NULL) {
@@ -885,13 +982,15 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
         }
     }
 
-    char starting_message[192];
+    progress_context.account_youtube_starts = youtube_limited;
+    char starting_message[256];
     if (playlist && summary.playlist_entries > 0U) {
         (void)snprintf(
             starting_message,
             sizeof(starting_message),
-            "Playlist encontrada: %zu itens · iniciando yt-dlp…",
-            summary.playlist_entries);
+            "Playlist: %zu itens; %zu já encontrados · retomando os pendentes…",
+            progress_context.playlist_total,
+            progress_context.playlist_successful);
     } else {
         (void)snprintf(
             starting_message,
@@ -903,11 +1002,14 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
         userdata,
         task->id,
         DLD_STATUS_DOWNLOADING,
-        false,
-        0.0,
+        playlist && progress_context.playlist_total > 0U,
+        progress_context.playlist_total > 0U
+            ? 100.0 * (double)progress_context.playlist_successful /
+                  (double)progress_context.playlist_total
+            : 0.0,
         NULL,
         starting_message,
-        NULL);
+        playlist ? destination_dir : NULL);
 
     char *tmp_root = path_join(engine->data_dir, "tmp");
     char *tmp_dir = tmp_root != NULL ? path_join(tmp_root, task->id) : NULL;
@@ -924,93 +1026,138 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
         goto oom;
     }
 
-    DldCommand command;
-    DldProcessResult result;
-    dld_command_init(&command);
-    dld_process_result_init(&result);
-    bool ok = dld_build_download_command(
-        engine->yt_dlp,
-        task->input_url,
-        template_path,
-        playlist,
-        kind,
-        format,
-        max_height,
-        bitrate,
-        youtube_limited,
-        youtube_allowance,
-        auth,
-        &command,
-        error);
-
-    progress_context = (ProgressContext){
-        .engine = engine,
-        .task = task,
-        .callback = callback,
-        .userdata = userdata,
-        .account_youtube_starts = youtube_limited,
-        .is_playlist = playlist,
-        .destination_dir = destination_dir,
-        .format = format,
-        .playlist_total = summary.is_playlist ? summary.playlist_entries : 0U,
-        .published = 0U,
-        .failed_items = 0U,
-        .last_path = NULL,
-    };
-    if (progress_context.playlist_total > 0U) {
-        progress_context.playlist_item_state =
-            calloc(progress_context.playlist_total + 1U, sizeof(*progress_context.playlist_item_state));
-        if (progress_context.playlist_item_state == NULL) {
-            (void)dld_app_error_set(error, DLD_ERROR_INTERNAL,
-                                    "Memória insuficiente para acompanhar os itens da playlist.",
-                                    "download", false, 0);
-            dld_command_clear(&command);
-            dld_process_result_clear(&result);
-            free(template_path);
-            dld_media_summary_clear(&summary);
-            free(tmp_dir);
-            goto fail;
-        }
-        char message[160];
-        (void)snprintf(message, sizeof(message), "Playlist: 0/%zu itens com saída válida",
-                       progress_context.playlist_total);
-        emit_event(callback, userdata, task->id, DLD_STATUS_DOWNLOADING,
-                   true, 0.0, NULL, message, destination_dir);
-    }
-
-    if (ok) {
-        ok = run_command(
-            &command,
-            0U,
-            cancel_flag,
-            download_progress_line,
-            &progress_context,
-            &result,
-            error);
-    }
-
-    const bool process_cancelled =
-        ok && (result.cancelled || cancel_requested(cancel_flag));
-    const int process_exit_code = ok ? result.exit_code : -1;
     char *process_error = NULL;
+    int process_exit_code = 0;
+    int last_nonzero_exit_code = 0;
+    bool process_failed = false;
+    bool resume_blocked = false;
+    bool ok = true;
+    unsigned attempts = 0U;
+    size_t resume_after = 0U;
+    const unsigned max_playlist_attempts = 3U;
 
-    if (ok && result.stderr_text != NULL && *result.stderr_text != '\0') {
-        process_error = dld_string_duplicate(result.stderr_text);
+    while (ok && attempts < max_playlist_attempts) {
+        char *playlist_items = playlist
+            ? build_playlist_items(&progress_context, resume_after + 1U, error)
+            : NULL;
+        if (playlist && playlist_items == NULL) {
+            ok = false;
+            break;
+        }
+        if (playlist && playlist_items[0] == '\0') {
+            free(playlist_items);
+            break;
+        }
+
+        if (youtube_limited && attempts > 0U) {
+            if (!youtube_remaining_allowance(engine, &youtube_allowance, error)) {
+                free(playlist_items);
+                ok = false;
+                break;
+            }
+            if (youtube_allowance == 0U) {
+                resume_blocked = true;
+                free(playlist_items);
+                break;
+            }
+        }
+
+        DldCommand command;
+        DldProcessResult result;
+        dld_command_init(&command);
+        dld_process_result_init(&result);
+        ok = dld_build_download_command(
+            engine->yt_dlp,
+            task->input_url,
+            template_path,
+            playlist,
+            kind,
+            format,
+            max_height,
+            bitrate,
+            youtube_limited,
+            youtube_allowance,
+            playlist_items,
+            auth,
+            &command,
+            error);
+        free(playlist_items);
+
+        if (ok) {
+            ok = run_command(
+                &command,
+                0U,
+                cancel_flag,
+                download_progress_line,
+                &progress_context,
+                &result,
+                error);
+        }
+
+        const bool process_cancelled =
+            ok && (result.cancelled || cancel_requested(cancel_flag));
+        const int attempt_exit_code = ok ? result.exit_code : -1;
+        char *attempt_error = NULL;
+        if (ok && result.stderr_text != NULL && *result.stderr_text != '\0') {
+            attempt_error = dld_string_duplicate(result.stderr_text);
+        }
+        dld_command_clear(&command);
+        dld_process_result_clear(&result);
+
+        if (!ok) {
+            free(attempt_error);
+            break;
+        }
+        if (process_cancelled) {
+            (void)dld_app_error_set(error, DLD_ERROR_CANCELLED,
+                                    "Download cancelado.", "download", false, 0);
+            free(attempt_error);
+            ok = false;
+            break;
+        }
+
+        ++attempts;
+        process_exit_code = attempt_exit_code;
+        if (attempt_exit_code != 0) {
+            process_failed = true;
+            last_nonzero_exit_code = attempt_exit_code;
+            if (attempt_error != NULL) {
+                free(process_error);
+                process_error = attempt_error;
+                attempt_error = NULL;
+            }
+        }
+        free(attempt_error);
+
+        if (!playlist || attempt_exit_code == 0 || attempts >= max_playlist_attempts ||
+            progress_context.last_playlist_index >= progress_context.playlist_total) {
+            break;
+        }
+
+        if (progress_context.last_playlist_index <= resume_after) {
+            /* Retry one startup failure once; avoid looping on a repeat with no progress. */
+            if (attempts > 1U || resume_after > 0U) break;
+        } else {
+            resume_after = progress_context.last_playlist_index;
+        }
+
+        char resume_message[192];
+        if (resume_after > 0U) {
+            (void)snprintf(resume_message, sizeof(resume_message),
+                           "Falha do yt-dlp após o item %zu; retomando dos itens seguintes (tentativa %u/%u)…",
+                           resume_after, attempts + 1U, max_playlist_attempts);
+        } else {
+            (void)snprintf(resume_message, sizeof(resume_message),
+                           "Falha ao iniciar yt-dlp; tentando novamente (%u/%u)…",
+                           attempts + 1U, max_playlist_attempts);
+        }
+        emit_event(callback, userdata, task->id, DLD_STATUS_DOWNLOADING,
+                   true,
+                   100.0 * (double)progress_context.playlist_successful /
+                       (double)progress_context.playlist_total,
+                   NULL, resume_message, destination_dir);
     }
 
-    if (process_cancelled) {
-        (void)dld_app_error_set(
-            error,
-            DLD_ERROR_CANCELLED,
-            "Download cancelado.",
-            "download",
-            false,
-            0);
-        ok = false;
-    }
-
-    dld_command_clear(&command);
-    dld_process_result_clear(&result);
     free(template_path);
 
     if (!ok) {
@@ -1299,36 +1446,42 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
         const size_t unresolved = progress_context.playlist_total - progress_context.playlist_resolved;
         const bool partial =
             progress_context.playlist_successful < progress_context.playlist_total ||
-            progress_context.failed_items > 0U || process_exit_code != 0;
+            progress_context.failed_items > 0U ||
+            (process_failed && progress_context.playlist_successful < progress_context.playlist_total);
         if (partial) {
             char message[1024];
-            char *process_detail = process_exit_code != 0 ? yt_dlp_error_line(process_error) : NULL;
-            if (process_exit_code != 0 && process_detail != NULL) {
+            char *process_detail = process_failed ? yt_dlp_error_line(process_error) : NULL;
+            const char *resume_note = resume_blocked
+                ? " Retomada pausada: limite local de downloads do YouTube atingido; tente novamente mais tarde."
+                : "";
+            if (process_failed && process_detail != NULL) {
                 (void)snprintf(
                     message, sizeof(message),
-                    "Playlist parcial: %zu/%zu itens com saída válida; %zu falhas locais; %zu sem resultado registrado. Erro do yt-dlp: %s",
+                    "Playlist parcial: %zu/%zu itens com saída válida; %zu falhas locais; %zu sem resultado registrado. Erro do yt-dlp: %s%s",
                     progress_context.playlist_successful,
                     progress_context.playlist_total,
                     progress_context.failed_items,
                     unresolved,
-                    process_detail);
+                    process_detail,
+                    resume_note);
             } else {
                 (void)snprintf(
                     message, sizeof(message),
-                    "Playlist parcial: %zu/%zu itens com saída válida; %zu falhas locais; %zu sem resultado registrado%s",
+                    "Playlist parcial: %zu/%zu itens com saída válida; %zu falhas locais; %zu sem resultado registrado%s%s",
                     progress_context.playlist_successful,
                     progress_context.playlist_total,
                     progress_context.failed_items,
                     unresolved,
-                    process_exit_code != 0 ? " (yt-dlp reportou erro; detalhe indisponível)" : "");
+                    process_failed ? " (yt-dlp reportou erro; detalhe indisponível)" : "",
+                    resume_note);
             }
             (void)dld_app_error_set(
                 error,
-                process_exit_code != 0 ? DLD_ERROR_NETWORK : DLD_ERROR_INVALID_MEDIA,
+                process_failed ? DLD_ERROR_NETWORK : DLD_ERROR_INVALID_MEDIA,
                 message,
                 "download",
-                process_exit_code != 0,
-                process_exit_code);
+                process_failed,
+                last_nonzero_exit_code);
             free(process_detail);
             task->status = DLD_STATUS_PARTIAL;
         }

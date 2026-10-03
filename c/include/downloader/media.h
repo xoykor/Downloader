@@ -36,6 +36,7 @@ typedef struct {
     /* IDs de todos os itens da playlist, na ordem do array `entries`.
      * Pertencem à struct e são liberados por dld_media_summary_clear. */
     char **playlist_entry_ids;
+    size_t *playlist_entry_indexes;
     size_t playlist_entry_count;
 } DldMediaSummary;
 
@@ -98,6 +99,7 @@ bool dld_build_download_command(const char *yt_dlp, const char *url,
                                 const char *media_kind, const char *format,
                                 unsigned max_height, const char *bitrate,
                                 bool youtube_protection, unsigned youtube_allowance,
+                                const char *playlist_items,
                                 const DldAuthRef *auth,
                                 DldCommand *command, DldAppError *error);
 bool dld_build_ffprobe_command(const char *ffprobe, const char *input,

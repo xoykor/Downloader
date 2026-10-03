@@ -21,7 +21,7 @@ int main(void)
     DldCommand command; dld_command_init(&command);
     assert(dld_build_download_command("yt-dlp", "https://example.test/x", "/tmp/%(id)s.%(ext)s",
                                       false, "audio", "opus", 0U, "128K", true, 300U,
-                                      NULL, &command, &error));
+                                      NULL, NULL, &command, &error));
     bool saw_no_playlist = false, saw_audio_format = false;
     for (size_t i = 0; i < command.argc; ++i) {
         if (strcmp(command.argv[i], "--no-playlist") == 0) saw_no_playlist = true;
@@ -38,13 +38,14 @@ int main(void)
     assert(dld_build_download_command("yt-dlp", "https://example.test/playlist",
                                       "/tmp/%(id)s.%(ext)s", true,
                                       "video+audio", "auto", 0U, "auto", true, 42U,
-                                      NULL, &command, &error));
+                                      "1-3,7", NULL, &command, &error));
     bool saw_yes_playlist = false;
     bool saw_ignore_errors = false;
     bool saw_track_template = false;
     bool saw_after_move = false;
     bool saw_before_dl = false;
     bool saw_max_downloads = false;
+    bool saw_playlist_items = false;
     bool saw_ignore_config = false;
     bool saw_no_simulate = false;
     bool saw_sleep_interval_one = false;
@@ -52,6 +53,10 @@ int main(void)
     for (size_t i = 0; i < command.argc; ++i) {
         if (strcmp(command.argv[i], "--yes-playlist") == 0) saw_yes_playlist = true;
         if (strcmp(command.argv[i], "--ignore-errors") == 0) saw_ignore_errors = true;
+        if (strcmp(command.argv[i], "--playlist-items") == 0 &&
+            i + 1U < command.argc && strcmp(command.argv[i + 1U], "1-3,7") == 0) {
+            saw_playlist_items = true;
+        }
         if (strncmp(command.argv[i], "TRACK ", 6U) == 0) saw_track_template = true;
         if (strncmp(command.argv[i], "after_move:FILE ", 16U) == 0) saw_after_move = true;
         if (strncmp(command.argv[i], "before_dl:POLICY_VIDEO ", 23U) == 0) saw_before_dl = true;
@@ -71,7 +76,7 @@ int main(void)
             saw_sleep_requests = true;
         }
     }
-    assert(saw_yes_playlist && saw_ignore_errors);
+    assert(saw_yes_playlist && saw_ignore_errors && saw_playlist_items);
     assert(saw_track_template && saw_after_move);
     assert(saw_before_dl && saw_max_downloads);
     assert(saw_ignore_config && saw_no_simulate);

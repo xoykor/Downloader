@@ -51,6 +51,7 @@ void dld_media_summary_clear(DldMediaSummary *summary)
         free(summary->playlist_entry_ids[i]);
     }
     free(summary->playlist_entry_ids);
+    free(summary->playlist_entry_indexes);
     dld_media_summary_init(summary);
 }
 
@@ -249,6 +250,7 @@ bool dld_build_download_command(const char *yt_dlp, const char *url,
                                 const char *media_kind, const char *format,
                                 unsigned max_height, const char *bitrate,
                                 bool youtube_protection, unsigned youtube_allowance,
+                                const char *playlist_items,
                                 const DldAuthRef *auth,
                                 DldCommand *command, DldAppError *error)
 {
@@ -274,6 +276,11 @@ bool dld_build_download_command(const char *yt_dlp, const char *url,
          */
         if (!command_push(command, "--yes-playlist") ||
             !command_push(command, "--ignore-errors")) {
+            goto oom;
+        }
+        if (playlist_items != NULL && *playlist_items != '\0' &&
+            (!command_push(command, "--playlist-items") ||
+             !command_push(command, playlist_items))) {
             goto oom;
         }
     } else if (!command_push(command, "--no-playlist")) {
@@ -492,6 +499,7 @@ bool dld_parse_ytdlp_summary(const char *json_text, DldMediaSummary *summary,
         /* Coleta os IDs de todos os itens para deduplicação por entrada. */
         {
             char **ids = NULL;
+            size_t *indexes = NULL;
             size_t count = 0U;
             size_t cap = 0U;
             for (size_t i = 0U; i < summary->playlist_entries; ++i) {
@@ -504,10 +512,16 @@ bool dld_parse_ytdlp_summary(const char *json_text, DldMediaSummary *summary,
                     char **grown = realloc(ids, cap * sizeof(*grown));
                     if (grown == NULL) { free(id); break; }
                     ids = grown;
+                    size_t *grown_indexes = realloc(indexes, cap * sizeof(*grown_indexes));
+                    if (grown_indexes == NULL) { free(id); break; }
+                    indexes = grown_indexes;
                 }
-                ids[count++] = id;
+                ids[count] = id;
+                indexes[count] = i + 1U;
+                ++count;
             }
             summary->playlist_entry_ids = ids;
+            summary->playlist_entry_indexes = indexes;
             summary->playlist_entry_count = count;
         }
     }

@@ -65,9 +65,8 @@ static void write_wav(const char *path)
  * Simula o comportamento relevante do yt-dlp:
  * - a análise anuncia uma playlist com duas faixas;
  * - o download produz a primeira faixa e seus eventos de progresso;
- * - a segunda faixa "falha", fazendo o processo terminar com código 1.
- *
- * A engine deve conservar/publicar a faixa válida em vez de descartar tudo.
+ * - a primeira execução falha na segunda faixa;
+ * - a retomada seleciona apenas o índice 2 e a conclui.
  */
 static void write_fake_ytdlp(const char *path, const char *fixture)
 {
@@ -93,11 +92,19 @@ static void write_fake_ytdlp(const char *path, const char *fixture)
 
     fputs("output=''\n", script);
     fputs("previous=''\n", script);
+    fputs("items=''\n", script);
     fputs("for arg in \"$@\"; do\n", script);
     fputs("  if [ \"$previous\" = \"-o\" ]; then output=\"$arg\"; break; fi\n", script);
+    fputs("  if [ \"$previous\" = \"--playlist-items\" ]; then items=\"$arg\"; fi\n", script);
     fputs("  previous=\"$arg\"\n", script);
     fputs("done\n", script);
     fputs("dir=${output%/*}\n", script);
+
+    fprintf(script, "if [ \"$items\" = \"2\" ]; then\n  cp '%s' \"$dir/Faixa Dois [id2].wav\"\n", fixture);
+    fputs("  printf '%s\\n' 'POLICY_VIDEO id2'\n", script);
+    fputs("  printf '%s\\n' 'TRACK {\"id\":\"id2\",\"title\":\"Faixa Dois\",\"playlist_index\":2,\"playlist_count\":2} {\"_percent_str\":\"100.0%%\",\"_speed_str\":\"1.0MiB/s\",\"eta\":0,\"status\":\"finished\"}' >&2\n", script);
+    fputs("  printf 'FILE {\"id\":\"id2\",\"title\":\"Faixa Dois\",\"playlist_index\":2,\"playlist_count\":2,\"filepath\":\"%s/Faixa Dois [id2].wav\"}\\n' \"$dir\"\n", script);
+    fputs("  exit 0\nfi\n", script);
 
     fprintf(
         script,
@@ -280,7 +287,7 @@ static void test_conversion(DldEngine *engine,
     dld_task_record_clear(&task);
 }
 
-static void test_partial_playlist(DldEngine *engine,
+static void test_resume_playlist_after_failure(DldEngine *engine,
                                   const char *output,
                                   DldAppError *error)
 {
@@ -308,11 +315,8 @@ static void test_partial_playlist(DldEngine *engine,
         &stats,
         error));
 
-    assert(task.status == DLD_STATUS_PARTIAL);
-    assert(task.error.message != NULL);
-    assert(strstr(task.error.message, "ERROR: [youtube] id2: Video unavailable") != NULL);
-    assert(strstr(stats.parent_terminal_message,
-                  "ERROR: [youtube] id2: Video unavailable") != NULL);
+    assert(task.status == DLD_STATUS_COMPLETED);
+    assert(task.error.message == NULL);
     assert(stats.child_progress_events > 0U);
     assert(stats.child_completed_events > 0U);
     assert(stats.child_completed_path[0] != '\0');
@@ -329,7 +333,7 @@ static void test_partial_playlist(DldEngine *engine,
         &youtube_starts,
         &oldest_start,
         error));
-    assert(youtube_starts == 1U);
+    assert(youtube_starts == 2U);
     assert(oldest_start > 0U);
 
     char published[768];
@@ -339,6 +343,11 @@ static void test_partial_playlist(DldEngine *engine,
         "%s/Faixa Um [id1].wav",
         output);
     assert(access(published, F_OK) == 0);
+
+    char resumed[768];
+    (void)snprintf(resumed, sizeof(resumed), "%s/Faixa Dois [id2].wav", output);
+    assert(access(resumed, F_OK) == 0);
+    assert(unlink(resumed) == 0);
 
     assert(unlink(published) == 0);
 
@@ -505,7 +514,7 @@ int main(void)
     test_conversion(&engine, input, &error);
     dld_app_error_clear(&error);
 
-    test_partial_playlist(&engine, output, &error);
+    test_resume_playlist_after_failure(&engine, output, &error);
     dld_app_error_clear(&error);
 
     /* Reescreve o fake para duas faixas válidas; a partir daqui os testes usam
