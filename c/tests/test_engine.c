@@ -301,7 +301,7 @@ static void test_partial_playlist(DldEngine *engine,
         &stats,
         error));
 
-    assert(task.status == DLD_STATUS_COMPLETED);
+    assert(task.status == DLD_STATUS_PARTIAL);
     assert(stats.child_progress_events > 0U);
     assert(stats.child_completed_events > 0U);
     assert(stats.child_completed_path[0] != '\0');
