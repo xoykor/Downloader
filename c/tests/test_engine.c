@@ -15,6 +15,7 @@ typedef struct {
     size_t child_progress_events;
     size_t child_completed_events;
     char child_completed_path[768];
+    char parent_terminal_message[1024];
 } EventStats;
 
 static void write_le16(FILE *file, uint16_t value)
@@ -137,7 +138,7 @@ static void write_fake_ytdlp(const char *path, const char *fixture)
     fputs("  exit 0\n", script);
     fputs("fi\n", script);
 
-    fputs("printf '%s\\n' 'item id2 indisponível' >&2\n", script);
+    fputs("printf '%s\\n' 'ERROR: [youtube] id2: Video unavailable' >&2\n", script);
     fputs("exit 1\n", script);
 
     assert(fclose(script) == 0);
@@ -226,7 +227,13 @@ static void capture_event(const DldEngineEvent *event, void *userdata)
 {
     EventStats *stats = userdata;
     if (event == NULL || event->task_id == NULL) return;
-    if (strstr(event->task_id, "::") == NULL) return;
+    if (strstr(event->task_id, "::") == NULL) {
+        if (event->status == DLD_STATUS_PARTIAL && event->message != NULL) {
+            (void)snprintf(stats->parent_terminal_message,
+                           sizeof(stats->parent_terminal_message), "%s", event->message);
+        }
+        return;
+    }
 
     if (event->has_progress) {
         ++stats->child_progress_events;
@@ -302,6 +309,10 @@ static void test_partial_playlist(DldEngine *engine,
         error));
 
     assert(task.status == DLD_STATUS_PARTIAL);
+    assert(task.error.message != NULL);
+    assert(strstr(task.error.message, "ERROR: [youtube] id2: Video unavailable") != NULL);
+    assert(strstr(stats.parent_terminal_message,
+                  "ERROR: [youtube] id2: Video unavailable") != NULL);
     assert(stats.child_progress_events > 0U);
     assert(stats.child_completed_events > 0U);
     assert(stats.child_completed_path[0] != '\0');

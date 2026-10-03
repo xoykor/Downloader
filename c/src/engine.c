@@ -400,6 +400,39 @@ typedef struct {
     char *last_path;
 } ProgressContext;
 
+static char *yt_dlp_error_line(const char *stderr_text)
+{
+    if (stderr_text == NULL || *stderr_text == '\0') return NULL;
+
+    const char *selected = NULL;
+    size_t selected_length = 0U;
+    const char *line = stderr_text;
+    while (*line != '\0') {
+        const char *end = strchr(line, '\n');
+        size_t length = end != NULL ? (size_t)(end - line) : strlen(line);
+        while (length > 0U && (line[length - 1U] == '\r' || line[length - 1U] == ' ')) --length;
+        while (length > 0U && *line == ' ') {
+            ++line;
+            --length;
+        }
+        if (length > 0U) {
+            selected = line;
+            selected_length = length;
+            if (length >= 6U && strncmp(line, "ERROR:", 6U) == 0) break;
+        }
+        if (end == NULL) break;
+        line = end + 1;
+    }
+
+    if (selected == NULL) return NULL;
+    if (selected_length > 512U) selected_length = 512U;
+    char *result = malloc(selected_length + 1U);
+    if (result == NULL) return NULL;
+    memcpy(result, selected, selected_length);
+    result[selected_length] = '\0';
+    return result;
+}
+
 static char *track_event_id(const DldTaskRecord *task,
                             const char *media_id,
                             size_t playlist_index)
@@ -1268,15 +1301,27 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
             progress_context.playlist_successful < progress_context.playlist_total ||
             progress_context.failed_items > 0U || process_exit_code != 0;
         if (partial) {
-            char message[320];
-            (void)snprintf(
-                message, sizeof(message),
-                "Playlist parcial: %zu/%zu itens com saída válida; %zu falhas locais; %zu sem resultado registrado%s",
-                progress_context.playlist_successful,
-                progress_context.playlist_total,
-                progress_context.failed_items,
-                unresolved,
-                process_exit_code != 0 ? " (yt-dlp reportou erro)" : "");
+            char message[1024];
+            char *process_detail = process_exit_code != 0 ? yt_dlp_error_line(process_error) : NULL;
+            if (process_exit_code != 0 && process_detail != NULL) {
+                (void)snprintf(
+                    message, sizeof(message),
+                    "Playlist parcial: %zu/%zu itens com saída válida; %zu falhas locais; %zu sem resultado registrado. Erro do yt-dlp: %s",
+                    progress_context.playlist_successful,
+                    progress_context.playlist_total,
+                    progress_context.failed_items,
+                    unresolved,
+                    process_detail);
+            } else {
+                (void)snprintf(
+                    message, sizeof(message),
+                    "Playlist parcial: %zu/%zu itens com saída válida; %zu falhas locais; %zu sem resultado registrado%s",
+                    progress_context.playlist_successful,
+                    progress_context.playlist_total,
+                    progress_context.failed_items,
+                    unresolved,
+                    process_exit_code != 0 ? " (yt-dlp reportou erro; detalhe indisponível)" : "");
+            }
             (void)dld_app_error_set(
                 error,
                 process_exit_code != 0 ? DLD_ERROR_NETWORK : DLD_ERROR_INVALID_MEDIA,
@@ -1284,6 +1329,7 @@ static bool execute_download(DldEngine *engine, DldTaskRecord *task, atomic_bool
                 "download",
                 process_exit_code != 0,
                 process_exit_code);
+            free(process_detail);
             task->status = DLD_STATUS_PARTIAL;
         }
     }
